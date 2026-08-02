@@ -54,6 +54,8 @@ func main() {
 					break
 				}
 			}
+
+			w.Header().Add("Vary", "Origin")
 			if isAllowed {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 			}

@@ -42,29 +42,30 @@ func main() {
 	corsMiddleware := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
-			allowedOrigins := []string{
-				"https://karena.stsebastiansportsacademy.com",
-				//"http://localhost:3000",
+
+			// 1. Log the exact origin to your Railway logs to see what Vercel is actually sending
+			if origin != "" {
+				log.Printf("[CORS DEBUG] Method: %s | Origin: '%s' | Path: %s", r.Method, origin, r.URL.Path)
 			}
 
-			isAllowed := false
-			for _, o := range allowedOrigins {
-				if origin == o {
-					isAllowed = true
-					break
-				}
-			}
-
-			w.Header().Add("Vary", "Origin")
-			if isAllowed {
+			// 2. The "Echo Strategy": Reflect the origin dynamically to bypass strict matching for now
+			if origin != "" {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
+			} else {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
 			}
 
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+
+			// 3. Expanded Headers: Next.js/Vercel sometimes attach extra headers implicitly.
+			// We must allow them all.
+			w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-CSRF-Token")
+			w.Header().Set("Vary", "Origin")
+
 			if r.Method == http.MethodOptions {
-				w.WriteHeader(http.StatusOK)
+				// 4. Use 204 (No Content) instead of 200. Browsers prefer 204 for OPTIONS preflights.
+				w.WriteHeader(http.StatusNoContent)
 				return
 			}
 

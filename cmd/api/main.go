@@ -78,6 +78,7 @@ func main() {
 	mux.HandleFunc("POST /api/v1/webhook/paystack", bookingHandler.PaystackWebhook)
 	mux.HandleFunc("/ws/v1/payment-status", bookingHandler.WSStatusHandler)
 
+	handler := corsMiddleware(mux)
 	log.Printf("Server starting on port %s...\n", port)
-	log.Fatal(http.ListenAndServe(":"+port, corsMiddleware(mux)))
+	log.Fatal(http.ListenAndServe(":"+port, handler))
 }

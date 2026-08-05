@@ -13,11 +13,13 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"turf-booking-backend/internal/config"
 	"turf-booking-backend/internal/models"
 	"turf-booking-backend/internal/services"
+	"turf-booking-backend/internal/utils"
 	"turf-booking-backend/internal/ws"
 
 	"github.com/gorilla/websocket"
@@ -31,17 +33,30 @@ type BookingHandler struct {
 	Collection *mongo.Collection
 	Config     *config.Config
 	Hub        *ws.PaymentHub
+	Locker     *utils.SlotLocker
 }
 
 func (h *BookingHandler) GetBookings(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	filter := bson.M{"$or": bson.A{
-		bson.M{"paymentDetails.paymentStatus": "Completed"},
-		bson.M{"bookingDetails.bookingStatus": bson.M{"$in": []string{"Booked", "Pending"}}},
-	}}
-	cursor, err := h.Collection.Find(ctx, filter)
+	loc, err := time.LoadLocation("Africa/Nairobi")
+	if err != nil {
+		loc = time.UTC
+	}
+	todayStr := time.Now().In(loc).Format("2006-01-02")
+
+	filter := bson.M{
+		"bookingDetails.date": bson.M{"$gte": todayStr},
+		"$or": bson.A{
+			bson.M{"paymentDetails.paymentStatus": "Completed"},
+			bson.M{"bookingDetails.bookingStatus": bson.M{"$in": []string{"Booked", "Pending"}}},
+		},
+	}
+
+	findOptions := options.Find().SetSort(bson.D{{"bookingDetails.date", 1}, {"bookingDetails.time", 1}})
+
+	cursor, err := h.Collection.Find(ctx, filter, findOptions)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -49,7 +64,11 @@ func (h *BookingHandler) GetBookings(w http.ResponseWriter, r *http.Request) {
 	defer cursor.Close(ctx)
 
 	var bookings []models.Booking
-	cursor.All(ctx, &bookings)
+
+	if err := cursor.All(ctx, &bookings); err != nil {
+		http.Error(w, "Failed to decode bookings", http.StatusInternalServerError)
+		return
+	}
 
 	var bookedSlots []map[string]string
 	for _, b := range bookings {
@@ -173,32 +192,64 @@ func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request)
 	}
 
 	var amountInCents int
+	var requiredCapacity int
+
 	switch req.PitchType {
 	case "8Aside":
 		amountInCents = 12000 * 100
+		requiredCapacity = 2
 	case "5Aside":
 		amountInCents = 6500 * 100
+		requiredCapacity = 1
 	default:
 		http.Error(w, "Invalid pitch type provided", http.StatusBadRequest)
 		return
 	}
 
+	slotKey := fmt.Sprintf("%s|%s", req.Date, req.Time)
+
+	// LOCK THE SPECIFIC SLOT
+	// If someone books Friday at 8 PM, they do not block someone booking Saturday at 10 AM.
+	h.Locker.Lock(slotKey)
+
+	unlockMutex := sync.OnceFunc(func() {
+		h.Locker.Unlock(slotKey)
+	})
+
+	defer unlockMutex()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	existingBookingFilter := bson.M{
 		"bookingDetails.date":          req.Date,
 		"bookingDetails.time":          req.Time,
-		"bookingDetails.pitchType":     req.PitchType,
 		"bookingDetails.bookingStatus": bson.M{"$in": []string{"Pending", "Confirmed"}},
 	}
-
-	var existingBooking models.Booking
-	err := h.Collection.FindOne(r.Context(), existingBookingFilter).Decode(&existingBooking)
-
-	if err == nil {
-		http.Error(w, "This slot is currently locked or already booked", http.StatusConflict)
+	cursor, err := h.Collection.Find(ctx, existingBookingFilter)
+	if err != nil {
+		http.Error(w, "Database read error", http.StatusInternalServerError)
 		return
-	} else if err != mongo.ErrNoDocuments {
-		log.Printf("Database error: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
+	defer cursor.Close(ctx)
+
+	var existingBookings []models.Booking
+	if err := cursor.All(ctx, &existingBookings); err != nil {
+		http.Error(w, "Failed to decode bookings", http.StatusInternalServerError)
+		return
+	}
+
+	takenCapacity := 0
+	for _, b := range existingBookings {
+		if b.BookingDetails.PitchType == "8Aside" {
+			takenCapacity += 2
+		} else if b.BookingDetails.PitchType == "5Aside" {
+			takenCapacity += 1
+		}
+	}
+
+	if takenCapacity+requiredCapacity > 2 {
+		http.Error(w, "This slot is currently locked or already fully booked", http.StatusConflict)
 		return
 	}
 
@@ -227,13 +278,12 @@ func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request)
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	if _, err := h.Collection.InsertOne(ctx, newBooking); err != nil {
 		http.Error(w, "Failed to initialize booking", http.StatusInternalServerError)
 		return
 	}
+
+	unlockMutex()
 
 	email := "khalifahnur1095@gmail.com"
 
@@ -248,7 +298,7 @@ func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request)
 			},
 		}
 
-		h.Collection.UpdateOne(ctx, filter, update)
+		h.Collection.UpdateOne(context.Background(), filter, update)
 
 		log.Printf("[PAYMENT_ERROR]: %v", err)
 		http.Error(w, "Payment gateway unavailable", http.StatusBadGateway)

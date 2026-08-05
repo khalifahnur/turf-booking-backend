@@ -8,6 +8,7 @@ import (
 	"turf-booking-backend/internal/db"
 	"turf-booking-backend/internal/handlers"
 	"turf-booking-backend/internal/services"
+	"turf-booking-backend/internal/utils"
 	"turf-booking-backend/internal/ws"
 )
 
@@ -35,6 +36,7 @@ func main() {
 		Collection: collection,
 		Config:     cfg,
 		Hub:        hub,
+		Locker:     utils.NewSlotLocker(),
 	}
 
 	mux := http.NewServeMux()

@@ -173,8 +173,9 @@ func ValidateDateTime(dateStr, timeRangeStr string) error {
 
 func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		UserName    string `json:"userName"`
-		TeamName    string `json:"teamName"`
+		UserName string `json:"userName"`
+		TeamName string `json:"teamName"`
+		//Email string `json:"email"`
 		PhoneNumber string `json:"phoneNumber"`
 		Date        string `json:"date"`
 		Time        string `json:"timeRange"`
@@ -262,6 +263,7 @@ func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request)
 			FullName:    req.UserName,
 			TeamName:    req.TeamName,
 			PhoneNumber: req.PhoneNumber,
+			//Email:req.Email,
 		},
 		BookingDetails: models.BookingDetails{
 			Date:          req.Date,
@@ -383,8 +385,6 @@ func (h *BookingHandler) PaystackWebhook(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		h.Hub.NotifyClient(reference, "Completed")
-
 		// go services.SendConfirmationSMS(
 		// 	h.Config,
 		// 	updatedBooking.Customer.Phone,
@@ -392,9 +392,17 @@ func (h *BookingHandler) PaystackWebhook(w http.ResponseWriter, r *http.Request)
 		// 	updatedBooking.BookingDetails.Date,
 		// 	updatedBooking.BookingDetails.TimeSlot,
 		// )
+
+		h.Hub.NotifyClient(reference, "Completed")
+		w.WriteHeader(http.StatusOK)
+		return
+
 	}
 
-	h.Hub.NotifyClient(reference, "Failed")
+	if event.Event == "charge.failed" || event.Event == "charge.abandoned" {
+		h.Hub.NotifyClient(reference, "Failed")
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 

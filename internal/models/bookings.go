@@ -9,6 +9,7 @@ import (
 type Team struct {
 	FullName    string `bson:"fullName" json:"fullName"`
 	TeamName    string `bson:"teamName" json:"teamName"`
+	//Email    string `bson:"email" json:"email"`
 	PhoneNumber string `bson:"phoneNumber" json:"phoneNumber"`
 }
 

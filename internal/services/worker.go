@@ -19,7 +19,7 @@ func StartCleanupWorker(collection *mongo.Collection) {
 
 			fiveMinsAgo := time.Now().Add(-5 * time.Minute)
 			filter := bson.M{
-				"bookingDetails.bookingStatus": "Pending",
+				"bookingDetails.bookingStatus": bson.M{"$in": []string{"Pending", "Failed"}},
 				"bookingDetails.createdAt":     bson.M{"$lt": fiveMinsAgo},
 			}
 

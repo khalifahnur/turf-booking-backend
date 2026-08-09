@@ -397,13 +397,21 @@ func (h *BookingHandler) PaystackWebhook(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusOK)
 		return
 
-	}
+	} else {
+		// filter := bson.M{"transaction.reference": reference}
+		// update := bson.M{
+		// 	"$set": bson.M{
+		// 		"transaction.paymentStatus":    "Failed",
+		// 		"bookingDetails.bookingStatus": "Failed",
+		// 	},
+		// }
 
-	if event.Event == "charge.failed" || event.Event == "charge.abandoned" {
+		// h.Collection.UpdateOne(context.Background(), filter, update)
 		h.Hub.NotifyClient(reference, "Failed")
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 
-	w.WriteHeader(http.StatusOK)
 }
 
 var upgrader = websocket.Upgrader{

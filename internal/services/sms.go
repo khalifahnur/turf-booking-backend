@@ -39,6 +39,10 @@ func FormatPhoneE164(phone string) string {
 func SendConfirmationSMS(cfg *config.Config, phone, name, date, timeSlot string) error {
 	formattedPhone := FormatPhoneE164(phone)
 
+	if formattedPhone == "" {
+		return fmt.Errorf("cannot send SMS: phone number is empty")
+	}
+
 	directionsLink := "https://maps.app.goo.gl/uBNLHePXgTiTciC5A"
 	message := fmt.Sprintf("Confirmed! %s, your pitch is booked @ %s Date: %s. Directions: %s", name, timeSlot, date, directionsLink)
 
@@ -73,6 +77,11 @@ func SendConfirmationSMS(cfg *config.Config, phone, name, date, timeSlot string)
 	defer res.Body.Close()
 
 	body, _ := io.ReadAll(res.Body)
+
+	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusCreated {
+		return fmt.Errorf("africa's talking rejected request (status %d): %s", res.StatusCode, string(body))
+	}
+
 	log.Printf("[AT RESPONSE %d]: %s", res.StatusCode, string(body))
 
 	return nil

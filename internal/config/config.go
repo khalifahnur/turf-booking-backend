@@ -13,6 +13,7 @@ type Config struct {
 	PaystackSK string
 	ATUsername string
 	ATAPIKey   string
+	ATSenderID string
 }
 
 func LoadConfig() *Config {
@@ -26,5 +27,6 @@ func LoadConfig() *Config {
 		PaystackSK: os.Getenv("PAYSTACK_SK"),
 		ATUsername: os.Getenv("AT_USERNAME"),
 		ATAPIKey:   os.Getenv("AT_API_KEY"),
+		ATSenderID: os.Getenv("AT_SENDER_ID"),
 	}
 }

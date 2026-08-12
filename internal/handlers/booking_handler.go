@@ -117,7 +117,7 @@ func (h *BookingHandler) GetBookingsAdmin(w http.ResponseWriter, r *http.Request
 			"status":      b.BookingDetails.BookingStatus,
 			"pitchType":   b.BookingDetails.PitchType,
 			"phoneNumber": b.Team.PhoneNumber,
-			"userName":    b.Team.TeamName,
+			"userName":    b.Team.FullName,
 			"teamName":    b.Team.FullName,
 		})
 	}
@@ -174,8 +174,8 @@ func ValidateDateTime(dateStr, timeRangeStr string) error {
 func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		UserName string `json:"userName"`
-		TeamName string `json:"teamName"`
-		//Email string `json:"email"`
+		//TeamName string `json:"teamName"`
+		Email       string `json:"email"`
 		PhoneNumber string `json:"phoneNumber"`
 		Date        string `json:"date"`
 		Time        string `json:"timeRange"`
@@ -260,10 +260,10 @@ func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request)
 	newBooking := models.Booking{
 		ID: bookingID,
 		Team: models.Team{
-			FullName:    req.UserName,
-			TeamName:    req.TeamName,
+			FullName: req.UserName,
+			//TeamName:    req.TeamName,
 			PhoneNumber: req.PhoneNumber,
-			//Email:req.Email,
+			Email:       req.Email,
 		},
 		BookingDetails: models.BookingDetails{
 			Date:          req.Date,
@@ -287,9 +287,7 @@ func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request)
 
 	unlockMutex()
 
-	email := "khalifahnur1095@gmail.com"
-
-	_, err = services.InitiatePayment(h.Config, req.PhoneNumber, email, amountInCents, reference)
+	_, err = services.InitiatePayment(h.Config, req.PhoneNumber, req.Email, amountInCents, reference)
 
 	if err != nil {
 		filter := bson.M{"transaction.reference": reference}
@@ -360,16 +358,7 @@ func (h *BookingHandler) PaystackWebhook(w http.ResponseWriter, r *http.Request)
 			},
 		}
 
-		var updatedBooking struct {
-			Customer struct {
-				Name  string `bson:"name"`
-				Phone string `bson:"phone"`
-			} `bson:"customer"`
-			BookingDetails struct {
-				Date     string `bson:"date"`
-				TimeSlot string `bson:"timeSlot"`
-			} `bson:"bookingDetails"`
-		}
+		var updatedBooking models.Booking
 
 		opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
 		err := h.Collection.FindOneAndUpdate(r.Context(), filter, update, opts).Decode(&updatedBooking)
@@ -385,33 +374,28 @@ func (h *BookingHandler) PaystackWebhook(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		// go services.SendConfirmationSMS(
-		// 	h.Config,
-		// 	updatedBooking.Customer.Phone,
-		// 	updatedBooking.Customer.Name,
-		// 	updatedBooking.BookingDetails.Date,
-		// 	updatedBooking.BookingDetails.TimeSlot,
-		// )
+		go func() {
+			err := services.SendConfirmationSMS(
+				h.Config,
+				updatedBooking.Team.PhoneNumber,
+				updatedBooking.Team.FullName,
+				updatedBooking.BookingDetails.Date,
+				updatedBooking.BookingDetails.Time,
+			)
+			if err != nil {
+				log.Printf("[SMS_ERROR] Failed to send SMS for ref %s: %v\n", reference, err)
+			}
+		}()
 
 		h.Hub.NotifyClient(reference, "Completed")
 		w.WriteHeader(http.StatusOK)
 		return
 
 	} else {
-		// filter := bson.M{"transaction.reference": reference}
-		// update := bson.M{
-		// 	"$set": bson.M{
-		// 		"transaction.paymentStatus":    "Failed",
-		// 		"bookingDetails.bookingStatus": "Failed",
-		// 	},
-		// }
-
-		// h.Collection.UpdateOne(context.Background(), filter, update)
 		h.Hub.NotifyClient(reference, "Failed")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-
 }
 
 var upgrader = websocket.Upgrader{

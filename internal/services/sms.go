@@ -1,43 +1,79 @@
 package services
 
-// import (
-// 	"fmt"
-// 	"io"
-// 	"net/http"
-// 	"net/url"
-// 	"strings"
-// 	"time"
+import (
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
 
-// 	"turf-booking-backend/internal/config"
-// )
+	"turf-booking-backend/internal/config"
+)
 
-// func SendConfirmationSMS(cfg *config.Config, phone, name, date, timeSlot string) {
-// 	message := fmt.Sprintf("Hello %s, your pitch booking for %s at %s is Confirmed. Payment received successfully. See you on the pitch!", name, date, timeSlot)
+func FormatPhoneE164(phone string) string {
+	cleaned := strings.TrimSpace(phone)
+	cleaned = strings.ReplaceAll(cleaned, " ", "")
+	cleaned = strings.ReplaceAll(cleaned, "-", "")
 
-// 	data := url.Values{}
-// 	data.Set("username", cfg.ATUsername)
-// 	data.Set("to", phone)
-// 	data.Set("message", message)
+	if strings.HasPrefix(cleaned, "+") {
+		return cleaned
+	}
 
-// 	// CRITICAL: Always include your Sender ID so it doesn't default to a generic number
-// 	if cfg.ATSenderID != "" {
-// 		data.Set("from", cfg.ATSenderID)
-// 	}
+	if strings.HasPrefix(cleaned, "254") {
+		return "+" + cleaned
+	}
 
-// 	req, _ := http.NewRequest("POST", "https://api.africastalking.com/version1/messaging", strings.NewReader(data.Encode()))
-// 	req.Header.Add("Accept", "application/json")
-// 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-// 	req.Header.Add("apiKey", cfg.ATAPIKey)
+	if strings.HasPrefix(cleaned, "0") {
+		return "+254" + cleaned[1:]
+	}
 
-// 	// Add a timeout so a slow AT server doesn't freeze your app
-// 	client := &http.Client{Timeout: 10 * time.Second}
-// 	res, err := client.Do(req)
-// 	if err != nil {
-// 		fmt.Printf("Error sending SMS: %v\n", err)
-// 		return
-// 	}
-// 	defer res.Body.Close()
+	if len(cleaned) == 9 && (strings.HasPrefix(cleaned, "7") || strings.HasPrefix(cleaned, "1")) {
+		return "+254" + cleaned
+	}
 
-// 	body, _ := io.ReadAll(res.Body)
-// 	fmt.Printf("Africa's Talking Response: %s\n", string(body))
-// }
+	return cleaned
+}
+
+func SendConfirmationSMS(cfg *config.Config, phone, name, date, timeSlot string) error {
+	formattedPhone := FormatPhoneE164(phone)
+
+	directionsLink := "https://maps.app.goo.gl/uBNLHePXgTiTciC5A"
+	message := fmt.Sprintf("Confirmed! %s, your pitch is booked @ %s Date: %s. Directions: %s", name, timeSlot, date, directionsLink)
+
+	data := url.Values{}
+	data.Set("username", cfg.ATUsername)
+	data.Set("to", formattedPhone)
+	data.Set("message", message)
+
+	if cfg.ATUsername != "sandbox" && cfg.ATSenderID != "" {
+		data.Set("from", cfg.ATSenderID)
+	}
+
+	endpoint := "https://api.africastalking.com/version1/messaging"
+	if cfg.ATUsername == "sandbox" {
+		endpoint = "https://api.sandbox.africastalking.com/version1/messaging"
+	}
+
+	req, err := http.NewRequest("POST", endpoint, strings.NewReader(data.Encode()))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Add("Accept", "application/json")
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Add("apiKey", cfg.ATAPIKey)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to execute SMS request: %w", err)
+	}
+	defer res.Body.Close()
+
+	body, _ := io.ReadAll(res.Body)
+	log.Printf("[AT RESPONSE %d]: %s", res.StatusCode, string(body))
+
+	return nil
+}

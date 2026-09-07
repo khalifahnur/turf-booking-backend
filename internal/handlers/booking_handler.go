@@ -197,10 +197,10 @@ func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request)
 
 	switch req.PitchType {
 	case "8Aside":
-		amountInCents = 12000 * 100
+		amountInCents = 1 * 100
 		requiredCapacity = 2
 	case "5Aside":
-		amountInCents = 6500 * 100
+		amountInCents = 1 * 100
 		requiredCapacity = 1
 	default:
 		http.Error(w, "Invalid pitch type provided", http.StatusBadRequest)

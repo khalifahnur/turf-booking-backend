@@ -43,7 +43,7 @@ func SendConfirmationSMS(cfg *config.Config, phone, name, date, timeSlot string)
 		return fmt.Errorf("cannot send SMS: phone number is empty")
 	}
 
-	directionsLink := "https://maps.app.goo.gl/uBNLHePXgTiTciC5A"
+	directionsLink := "https://maps.app.goo.gl/XjfyKBvQyhBifDBCA?g_st=ac"
 	message := fmt.Sprintf("Confirmed! %s, your pitch is booked @ %s Date: %s. Directions: %s", name, timeSlot, date, directionsLink)
 
 	data := url.Values{}

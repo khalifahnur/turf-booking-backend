@@ -23,9 +23,11 @@ type BookingDetails struct {
 }
 
 type Transaction struct {
-	PaymentStatus string    `bson:"paymentStatus" json:"paymentStatus"`
-	Reference     string    `bson:"reference" json:"reference"`
-	Timestamp     time.Time `bson:"timestamp" json:"timestamp"`
+	PaymentStatus string `bson:"paymentStatus" json:"paymentStatus"`
+	Reference     string `bson:"reference" json:"reference"`
+	// Amount is the price in whole KES that the server charged for the booking.
+	Amount    int       `bson:"amount,omitempty" json:"amount,omitempty"`
+	Timestamp time.Time `bson:"timestamp" json:"timestamp"`
 }
 
 type Booking struct {

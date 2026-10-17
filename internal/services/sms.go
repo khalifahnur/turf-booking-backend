@@ -76,13 +76,15 @@ func SendConfirmationSMS(cfg *config.Config, phone, name, date, timeSlot string)
 	}
 	defer res.Body.Close()
 
-	body, _ := io.ReadAll(res.Body)
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 
 	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusCreated {
 		return fmt.Errorf("africa's talking rejected request (status %d): %s", res.StatusCode, string(body))
 	}
 
-	log.Printf("[AT RESPONSE %d]: %s", res.StatusCode, string(body))
+	// The response body lists the recipient's phone number, so only the status
+	// goes in the log.
+	log.Printf("[AT RESPONSE %d]: SMS accepted", res.StatusCode)
 
 	return nil
 }

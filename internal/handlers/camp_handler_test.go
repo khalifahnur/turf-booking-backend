@@ -63,6 +63,9 @@ func (m *memCampStore) MarkPaid(_ context.Context, ref string, cents int64, now 
 	defer m.mu.Unlock()
 	for i := range m.regs {
 		if m.regs[i].Payment.Reference == ref && m.regs[i].Status != camp.StatusPaid {
+			if cents > 0 && cents < int64(m.regs[i].AmountKES)*100 {
+				return nil, nil // underpaid: the same guard as markPaidFilter's $expr
+			}
 			m.regs[i].Status = camp.StatusPaid
 			m.regs[i].Payment.PaidAmountCents = cents
 			m.regs[i].Payment.PaidAt = &now
@@ -73,15 +76,33 @@ func (m *memCampStore) MarkPaid(_ context.Context, ref string, cents int64, now 
 	return nil, nil
 }
 
-func (m *memCampStore) MarkFailed(_ context.Context, ref string, _ time.Time) error {
+func (m *memCampStore) MarkFailed(_ context.Context, ref string, _ time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i := range m.regs {
 		if m.regs[i].Payment.Reference == ref && m.regs[i].Status == camp.StatusPending {
 			m.regs[i].Status = camp.StatusFailed
+			return true, nil
 		}
 	}
-	return nil
+	return false, nil
+}
+
+func (m *memCampStore) FlagDuplicates(_ context.Context, childKey, phone string, weeks []string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var idx []int
+	for i, r := range m.regs {
+		if r.Child.Key == childKey && r.Parent.PhoneNumber == phone && r.Status == camp.StatusPaid && len(overlap(weeks, []models.CampRegistration{r})) > 0 {
+			idx = append(idx, i)
+		}
+	}
+	if len(idx) >= 2 {
+		for _, i := range idx {
+			m.regs[i].Duplicate = true
+		}
+	}
+	return len(idx), nil
 }
 
 func (m *memCampStore) Status(_ context.Context, ref string) (string, error) {
@@ -128,6 +149,7 @@ type campRig struct {
 	payCalls []payCall
 	payErr   error
 	sms      chan models.CampRegistration
+	told     []string
 	now      time.Time
 }
 
@@ -147,6 +169,11 @@ func newCampRig() *campRig {
 	h.sendSMS = func(_ *config.Config, reg models.CampRegistration) error {
 		rig.sms <- reg
 		return nil
+	}
+	h.notify = func(ref, status string) {
+		rig.mu.Lock()
+		defer rig.mu.Unlock()
+		rig.told = append(rig.told, ref+"="+status)
 	}
 	h.phoneLimiter = middleware.NewLimiter(6000, 1000) // out of the way unless a test wants it
 	rig.h = h
@@ -442,6 +469,11 @@ func TestCampRegisterPerPhoneRateLimit(t *testing.T) {
 	if codes[0] != 201 || codes[1] != 201 || codes[2] != 201 || codes[3] != http.StatusTooManyRequests {
 		t.Errorf("codes = %v, want three 201s then 429", codes)
 	}
+	rec := rig.register(goodBody(body{"childName": "Daudi Otieno"}))
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" || !strings.Contains(rec.Body.String(), "payment attempts") {
+		t.Errorf("limit response = %d %q (Retry-After %q): want a plain-language 429 with Retry-After",
+			rec.Code, rec.Body.String(), rec.Header().Get("Retry-After"))
+	}
 	// A different phone has its own allowance.
 	if rec := rig.register(goodBody(body{"childName": "Ema Wanjiru", "phoneNumber": "254799000111"})); rec.Code != 201 {
 		t.Errorf("another phone = %d", rec.Code)
@@ -449,9 +481,20 @@ func TestCampRegisterPerPhoneRateLimit(t *testing.T) {
 }
 
 func (r *campRig) webhook(event, ref string, cents int64) *httptest.ResponseRecorder {
+	return r.webhookEvent(paystackEvent{Event: event, Reference: ref, Status: "success", Currency: "KES", AmountCents: cents})
+}
+
+func (r *campRig) webhookEvent(ev paystackEvent) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	r.h.HandlePaystackEvent(rec, httptest.NewRequest(http.MethodPost, "/webhook", nil), event, ref, cents)
+	r.h.HandlePaystackEvent(rec, httptest.NewRequest(http.MethodPost, "/webhook", nil), ev)
 	return rec
+}
+
+// notified returns what the parent's open status socket was told, in order.
+func (r *campRig) notified() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.told...)
 }
 
 func TestCampPaymentSettlement(t *testing.T) {
@@ -679,6 +722,247 @@ func TestCampReferencesAreValidForTheStatusSocket(t *testing.T) {
 	for _, bad := range []string{"camp-", "camp-xyz", "camp-" + strings.Repeat("g", 32), "camp-camp-" + strings.Repeat("a", 32), "CAMP-" + strings.Repeat("a", 32)} {
 		if validReference(bad) {
 			t.Errorf("%q should not be a valid reference", bad)
+		}
+	}
+}
+
+// A parent who is turned away (already registered, or a typo) has not tried to
+// pay, so those attempts must not use up the per-phone allowance.
+func TestCampRefusedAttemptsDoNotUseTheRateLimit(t *testing.T) {
+	rig := newCampRig()
+	rig.h.phoneLimiter = middleware.NewLimiter(0.3, 2)
+	if rec := rig.register(goodBody(nil)); rec.Code != http.StatusCreated {
+		t.Fatalf("first = %d", rec.Code)
+	}
+	for i := 0; i < 10; i++ {
+		if rec := rig.register(goodBody(nil)); rec.Code != http.StatusConflict {
+			t.Fatalf("repeat %d = %d, want 409 (not 429)", i, rec.Code)
+		}
+		if rec := rig.register(goodBody(body{"email": "nope"})); rec.Code != http.StatusBadRequest {
+			t.Fatalf("typo %d = %d, want 400", i, rec.Code)
+		}
+	}
+	if rec := rig.register(goodBody(body{"childName": "Baraka Otieno"})); rec.Code != http.StatusCreated {
+		t.Errorf("second real attempt = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The two minutes are the whole point of the window, so the boundary is checked
+// against literal durations rather than the constant it is derived from.
+func TestCampPendingWindowBoundary(t *testing.T) {
+	rig := newCampRig()
+	if rec := rig.register(goodBody(nil)); rec.Code != http.StatusCreated {
+		t.Fatalf("first = %d", rec.Code)
+	}
+	rig.now = campNow.Add(119 * time.Second)
+	if rec := rig.register(goodBody(nil)); rec.Code != http.StatusConflict {
+		t.Errorf("at 119s the prompt may still be live: got %d, want 409", rec.Code)
+	}
+	rig.now = campNow.Add(121 * time.Second)
+	if rec := rig.register(goodBody(nil)); rec.Code != http.StatusCreated {
+		t.Errorf("at 121s a retry is allowed: got %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCampErrorMessagesAreSentences(t *testing.T) {
+	for _, over := range []body{
+		{"childName": ""}, {"parentName": ""}, {"email": "nope"}, {"phoneNumber": "123"},
+		{"program": "x"}, {"weeks": []string{}}, {"acceptedTerms": false}, {"termsVersion": "old"},
+	} {
+		rec := newCampRig().register(goodBody(over))
+		msg := strings.TrimSpace(rec.Body.String())
+		if msg == "" || msg[0] < 'A' || msg[0] > 'Z' {
+			t.Errorf("%v: message %q should start with a capital letter", over, msg)
+		}
+	}
+}
+
+func TestCampServerErrorsReassureAboutCharges(t *testing.T) {
+	rig := newCampRig()
+	rig.payErr = errors.New("down")
+	rec := rig.register(goodBody(nil))
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "not been charged") {
+		t.Errorf("gateway failure = %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func (r *campRig) registerAndGetRef(t *testing.T, over body) string {
+	t.Helper()
+	rec := r.register(goodBody(over))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("register = %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct{ Reference string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	return resp.Reference
+}
+
+// Paystack reports what it collected. Less than the price must not buy a place.
+func TestCampUnderpaymentDoesNotSettle(t *testing.T) {
+	rig := newCampRig()
+	ref := rig.registerAndGetRef(t, nil)
+
+	if rec := rig.webhook("charge.success", ref, 100_000); rec.Code != http.StatusOK {
+		t.Fatalf("underpaid webhook = %d, want 200 so Paystack stops retrying", rec.Code)
+	}
+	if r := rig.store.all()[0]; r.Status != camp.StatusPending || r.Payment.PaidAt != nil {
+		t.Errorf("an underpayment settled the registration: %+v", r)
+	}
+	select {
+	case <-rig.sms:
+		t.Error("confirmation SMS sent for an underpayment")
+	case <-time.After(100 * time.Millisecond):
+	}
+	for _, n := range rig.notified() {
+		if strings.HasSuffix(n, "=Completed") {
+			t.Errorf("parent told the payment completed: %v", rig.notified())
+		}
+	}
+
+	// Exactly the price, an overpayment, and an unknown amount all settle.
+	for _, cents := range []int64{250_000, 300_000, 0} {
+		rig := newCampRig()
+		ref := rig.registerAndGetRef(t, nil)
+		rig.webhook("charge.success", ref, cents)
+		if r := rig.store.all()[0]; r.Status != camp.StatusPaid {
+			t.Errorf("paying %d cents left the registration %s", cents, r.Status)
+		}
+	}
+}
+
+func TestCampWebhookIgnoresWrongCurrencyAndStatus(t *testing.T) {
+	for name, ev := range map[string]paystackEvent{
+		"USD":                             {Event: "charge.success", Status: "success", Currency: "USD", AmountCents: 250_000},
+		"success event but failed status": {Event: "charge.success", Status: "failed", Currency: "KES", AmountCents: 250_000},
+	} {
+		rig := newCampRig()
+		ev.Reference = rig.registerAndGetRef(t, nil)
+		if rec := rig.webhookEvent(ev); rec.Code != http.StatusOK {
+			t.Errorf("%s: webhook = %d", name, rec.Code)
+		}
+		if r := rig.store.all()[0]; r.Status != camp.StatusPending {
+			t.Errorf("%s: registration became %s", name, r.Status)
+		}
+	}
+	// Currency and status are optional in the payload; their absence is fine.
+	rig := newCampRig()
+	ref := rig.registerAndGetRef(t, nil)
+	rig.webhookEvent(paystackEvent{Event: "charge.success", Reference: ref, AmountCents: 250_000})
+	if r := rig.store.all()[0]; r.Status != camp.StatusPaid {
+		t.Errorf("a charge.success without currency/status = %s, want Paid", r.Status)
+	}
+}
+
+func TestCampFailureEvents(t *testing.T) {
+	rig := newCampRig()
+	ref := rig.registerAndGetRef(t, nil)
+
+	// Events that are not about the charge must not tell the parent it failed.
+	for _, e := range []string{"refund.processed", "transfer.success", "customeridentification.success"} {
+		if rec := rig.webhookEvent(paystackEvent{Event: e, Reference: ref}); rec.Code != http.StatusOK {
+			t.Errorf("%s = %d", e, rec.Code)
+		}
+	}
+	if len(rig.notified()) != 0 || rig.store.all()[0].Status != camp.StatusPending {
+		t.Fatalf("unrelated events changed state: told %v, status %s", rig.notified(), rig.store.all()[0].Status)
+	}
+
+	// A declined charge fails the registration and tells the parent once.
+	if rec := rig.webhookEvent(paystackEvent{Event: "charge.failed", Reference: ref}); rec.Code != http.StatusOK {
+		t.Fatalf("charge.failed = %d", rec.Code)
+	}
+	if rig.store.all()[0].Status != camp.StatusFailed {
+		t.Errorf("status = %s, want Failed", rig.store.all()[0].Status)
+	}
+	if got := rig.notified(); len(got) != 1 || got[0] != ref+"=Failed" {
+		t.Errorf("told %v", got)
+	}
+	if status, _ := rig.h.PaymentStatus(context.Background(), ref); status != "Failed" {
+		t.Errorf("PaymentStatus = %q", status)
+	}
+	// A redelivery repeats the message in case the socket missed it.
+	rig.webhookEvent(paystackEvent{Event: "charge.failed", Reference: ref})
+	if got := rig.notified(); len(got) != 2 {
+		t.Errorf("redelivered failure told %v", got)
+	}
+
+	// A late success still settles a failed registration.
+	rig.webhook("charge.success", ref, 250_000)
+	if rig.store.all()[0].Status != camp.StatusPaid {
+		t.Errorf("a late success after a failure left %s", rig.store.all()[0].Status)
+	}
+
+	// ...and a stray failure event can never undo a paid registration or alarm the parent.
+	before := len(rig.notified())
+	rig.webhookEvent(paystackEvent{Event: "charge.failed", Reference: ref})
+	if rig.store.all()[0].Status != camp.StatusPaid {
+		t.Errorf("a failure event changed a paid registration to %s", rig.store.all()[0].Status)
+	}
+	if len(rig.notified()) != before {
+		t.Errorf("a paid registration was announced as failed: %v", rig.notified())
+	}
+}
+
+func TestCampPaymentStatusMapping(t *testing.T) {
+	rig := newCampRig()
+	ref := rig.registerAndGetRef(t, nil)
+	for status, want := range map[string]string{
+		camp.StatusPending: "Pending",
+		camp.StatusPaid:    "Completed",
+		camp.StatusFailed:  "Failed",
+		camp.StatusExpired: "Failed",
+	} {
+		rig.store.mu.Lock()
+		rig.store.regs[0].Status = status
+		rig.store.mu.Unlock()
+		if got, err := rig.h.PaymentStatus(context.Background(), ref); err != nil || got != want {
+			t.Errorf("%s -> %q (%v), want %q", status, got, err, want)
+		}
+	}
+}
+
+// A parent who retries while the first prompt is still open can end up paying
+// twice. Both payments are real money; the owner has to see it.
+func TestCampDuplicatePaymentIsFlagged(t *testing.T) {
+	rig := newCampRig()
+	first := rig.registerAndGetRef(t, nil)
+	rig.now = campNow.Add(3 * time.Minute) // past the window: the retry is allowed
+	second := rig.registerAndGetRef(t, nil)
+
+	rig.webhook("charge.success", first, 250_000)
+	if r := rig.store.all()[0]; r.Duplicate {
+		t.Error("a single payment was flagged as a duplicate")
+	}
+	rig.webhook("charge.success", second, 250_000)
+	for i, r := range rig.store.all() {
+		if r.Status != camp.StatusPaid || !r.Duplicate {
+			t.Errorf("registration %d = status %s duplicate %v, want both paid and flagged", i, r.Status, r.Duplicate)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	rig.h.ListAdmin(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	var rows []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row["duplicate"] != true {
+			t.Errorf("admin row not flagged: %v", row)
+		}
+	}
+
+	// A sibling paying for the same week is not a duplicate.
+	other := newCampRig()
+	a := other.registerAndGetRef(t, nil)
+	b := other.registerAndGetRef(t, body{"childName": "Baraka Otieno"})
+	other.webhook("charge.success", a, 250_000)
+	other.webhook("charge.success", b, 250_000)
+	for _, r := range other.store.all() {
+		if r.Duplicate {
+			t.Errorf("sibling flagged as duplicate: %+v", r)
 		}
 	}
 }

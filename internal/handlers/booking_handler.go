@@ -503,6 +503,7 @@ func (h *BookingHandler) PaystackWebhook(w http.ResponseWriter, r *http.Request)
 			Reference string `json:"reference"`
 			Status    string `json:"status"`
 			Amount    int64  `json:"amount"`
+			Currency  string `json:"currency"`
 		} `json:"data"`
 	}
 
@@ -520,7 +521,13 @@ func (h *BookingHandler) PaystackWebhook(w http.ResponseWriter, r *http.Request)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		h.camp.HandlePaystackEvent(w, r, event.Event, reference, event.Data.Amount)
+		h.camp.HandlePaystackEvent(w, r, paystackEvent{
+			Event:       event.Event,
+			Reference:   reference,
+			Status:      event.Data.Status,
+			Currency:    event.Data.Currency,
+			AmountCents: event.Data.Amount,
+		})
 		return
 	}
 

@@ -110,12 +110,28 @@ func TestQuoteRejectsBadInput(t *testing.T) {
 		{"not a date", "fullDay", []string{"next week"}},
 		{"injection attempt", "fullDay", []string{`{"$ne":""}`}},
 		{"one good one bad", "fullDay", []string{"2026-11-02", "2026-11-04"}},
-		{"too many entries", "fullDay", strings.Split(strings.Repeat("2026-11-02,", 11), ",")},
 	}
 	for _, c := range cases {
 		if _, err := NewQuote(c.program, false, c.weeks, before); err == nil {
 			t.Errorf("%s: should have been rejected", c.name)
 		}
+	}
+}
+
+// Eleven entries, every one a valid week: only the size cap can refuse this,
+// so the test fails if the cap is removed (a split with a trailing "" would be
+// refused as an invalid week and prove nothing).
+func TestQuoteCapsTheNumberOfEntries(t *testing.T) {
+	eleven := make([]string, MaxWeeks+1)
+	for i := range eleven {
+		eleven[i] = "2026-11-02"
+	}
+	_, err := NewQuote("fullDay", false, eleven, before)
+	if err == nil || !strings.Contains(err.Error(), "too many") {
+		t.Errorf("err = %v, want the too-many-weeks refusal", err)
+	}
+	if _, err := NewQuote("fullDay", false, eleven[:MaxWeeks], before); err != nil {
+		t.Errorf("%d repeated entries are within the cap: %v", MaxWeeks, err)
 	}
 }
 
@@ -151,10 +167,45 @@ func TestReferenceAndLabels(t *testing.T) {
 	if !IsReference("camp-0123456789abcdef") || IsReference("0123456789abcdef01234567") || IsReference("") {
 		t.Error("IsReference must only match camp- references")
 	}
-	if got := WeeksLabel([]string{"2026-11-02", "2026-11-09"}); got != "w/c 2 Nov, 9 Nov" {
-		t.Errorf("WeeksLabel = %q", got)
+}
+
+func TestWeeksLabel(t *testing.T) {
+	all := make([]string, 0, 7)
+	for _, w := range Weeks() {
+		all = append(all, w.Start)
 	}
-	if got := WeeksLabel([]string{"2026-11-02", "2026-11-09", "2026-11-16", "2026-11-23"}); got != "4 weeks" {
-		t.Errorf("WeeksLabel for 4 = %q", got)
+	for _, c := range []struct {
+		name  string
+		weeks []string
+		want  string
+	}{
+		{"none", nil, ""},
+		{"one week", []string{"2026-11-02"}, "2-6 Nov"},
+		{"one week across a month", []string{"2026-11-30"}, "30 Nov - 4 Dec"},
+		{"two consecutive weeks", []string{"2026-11-02", "2026-11-09"}, "2 Nov - 13 Nov"},
+		{"unordered input", []string{"2026-11-09", "2026-11-02"}, "2 Nov - 13 Nov"},
+		{"a gap", []string{"2026-11-02", "2026-11-09", "2026-11-23"}, "2 Nov - 13 Nov, 23-27 Nov"},
+		{"the whole camp", all, "2 Nov - 18 Dec"},
+		{"unknown dates are ignored", []string{"2026-11-03", "2026-11-16"}, "16-20 Nov"},
+	} {
+		if got := WeeksLabel(c.weeks); got != c.want {
+			t.Errorf("%s: WeeksLabel = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestFormatKESAndProgramSummary(t *testing.T) {
+	for n, want := range map[int]string{0: "Ksh 0", 100: "Ksh 100", 1500: "Ksh 1,500", 3000: "Ksh 3,000", 17500: "Ksh 17,500", 1234567: "Ksh 1,234,567"} {
+		if got := FormatKES(n); got != want {
+			t.Errorf("FormatKES(%d) = %q, want %q", n, got, want)
+		}
+	}
+	full, _ := LookupProgram("fullDay")
+	half, _ := LookupProgram("halfDay")
+	if got := ProgramSummary(full, true); got != "Full day 8:30am - 4:00pm + lunch" {
+		t.Errorf("summary = %q", got)
+	}
+	if got := ProgramSummary(half, false); got != "Half day 8:30am - 12:30pm" {
+		t.Errorf("summary = %q", got)
 	}
 }

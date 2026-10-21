@@ -47,6 +47,44 @@ func TestName(t *testing.T) {
 	}
 }
 
+func TestNameNormalisesAndRejectsTricks(t *testing.T) {
+	// A phone's curly apostrophe is accepted and stored as a plain one.
+	for in, want := range map[string]string{
+		"Ng\u2019ang\u2019a":     "Ng'ang'a",
+		"O\u2018Brien":           "O'Brien",
+		"Wang\u02BCombe":         "Wang'ombe",
+		"Jose\u0301 Mun\u0303oz": "José Muñoz", // decomposed accents are composed
+	} {
+		got, err := Name(in)
+		if err != nil || got != want {
+			t.Errorf("Name(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	// Same name typed two ways must compare equal after normalising.
+	a, _ := Name("Jose\u0301")
+	b, _ := Name("José")
+	if a != b {
+		t.Errorf("composed and decomposed forms differ: %q vs %q", a, b)
+	}
+
+	for name, in := range map[string]string{
+		"hangul fillers (blank)":     "\u3164\u3164",
+		"hangul choseong filler":     "A\u115F",
+		"marks only":                 "\u0301\u0301\u0301",
+		"zalgo":                      "A" + strings.Repeat("\u0301", 10),
+		"punctuation only":           "..",
+		"hyphens only":               "--",
+		"one letter and punctuation": "A.",
+		"zero width joiner":          "Ama\u200Dni",
+		"right-to-left override":     "Amani\u202Etxt",
+		"emoji":                      "Amani \U0001F600",
+	} {
+		if got, err := Name(in); err == nil {
+			t.Errorf("%s: Name(%q) = %q should have been rejected", name, in, got)
+		}
+	}
+}
+
 func TestEmail(t *testing.T) {
 	for in, want := range map[string]string{
 		"abc@gmail.com":           "abc@gmail.com",

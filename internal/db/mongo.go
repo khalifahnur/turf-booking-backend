@@ -62,7 +62,14 @@ func EnsureCampIndexes(collection *mongo.Collection) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	_, err := collection.Indexes().CreateMany(ctx, []mongo.IndexModel{
+	_, err := collection.Indexes().CreateMany(ctx, campIndexModels())
+	if err != nil {
+		log.Printf("[DB] could not ensure camp indexes: %v", err)
+	}
+}
+
+func campIndexModels() []mongo.IndexModel {
+	return []mongo.IndexModel{
 		{
 			Keys:    bson.D{{Key: "payment.reference", Value: 1}},
 			Options: options.Index().SetUnique(true).SetName("uniq_payment_reference"),
@@ -81,8 +88,5 @@ func EnsureCampIndexes(collection *mongo.Collection) {
 			},
 			Options: options.Index().SetName("status_created"),
 		},
-	})
-	if err != nil {
-		log.Printf("[DB] could not ensure camp indexes: %v", err)
 	}
 }

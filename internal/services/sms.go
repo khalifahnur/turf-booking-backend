@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"turf-booking-backend/internal/camp"
 	"turf-booking-backend/internal/config"
 )
 
@@ -44,10 +45,15 @@ func SendConfirmationSMS(cfg *config.Config, phone, name, date, timeSlot string)
 }
 
 // SendCampConfirmationSMS tells a parent their child's camp place is paid for.
-func SendCampConfirmationSMS(cfg *config.Config, phone, child, programLabel, weeksLabel string, totalKES int) error {
-	message := fmt.Sprintf("Confirmed! %s is registered for the K-Arena Holiday Camp (%s, %s). Paid Ksh %d. Directions: %s",
-		child, programLabel, weeksLabel, totalKES, directionsLink)
-	return sendSMS(cfg, phone, message)
+// what is the programme summary ("Full day 8:30am - 4:00pm + lunch") and when is
+// the dates, so the message stands on its own.
+func SendCampConfirmationSMS(cfg *config.Config, phone, child, what, when string, totalKES int) error {
+	return sendSMS(cfg, phone, campConfirmationMessage(child, what, when, totalKES))
+}
+
+func campConfirmationMessage(child, what, when string, totalKES int) string {
+	return fmt.Sprintf("Confirmed! %s is registered for the K-Arena Holiday Football Camp: %s, %s. Paid %s. Directions: %s",
+		child, what, when, camp.FormatKES(totalKES), directionsLink)
 }
 
 func sendSMS(cfg *config.Config, phone, message string) error {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -185,23 +186,75 @@ func RangeLabel(w Week) string {
 	return fmt.Sprintf("%d %s - %d %s", s.Day(), s.Format("Jan"), e.Day(), e.Format("Jan"))
 }
 
-// WeeksLabel summarises chosen weeks for a text message: up to three weeks are
-// listed by their Monday ("w/c 2 Nov, 9 Nov"), more are counted.
+// FormatKES renders shillings the way the site and text messages show them:
+// "Ksh 3,000".
+func FormatKES(n int) string {
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	digits := strconv.Itoa(n)
+	var b strings.Builder
+	for i, d := range digits {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(d)
+	}
+	if neg {
+		return "Ksh -" + b.String()
+	}
+	return "Ksh " + b.String()
+}
+
+// ProgramSummary describes what was bought: "Full day 8:30am - 4:00pm + lunch".
+func ProgramSummary(p Program, lunch bool) string {
+	s := p.Label + " " + p.Hours
+	if lunch {
+		s += " + lunch"
+	}
+	return s
+}
+
+// WeeksLabel writes the chosen weeks as exact dates for a text message.
+// Consecutive weeks are joined into one range, so the whole camp reads
+// "2 Nov - 18 Dec" and weeks 1, 2 and 4 read "2 Nov - 13 Nov, 23-27 Nov".
 func WeeksLabel(weekStarts []string) string {
 	if len(weekStarts) == 0 {
 		return ""
 	}
-	if len(weekStarts) > 3 {
-		return fmt.Sprintf("%d weeks", len(weekStarts))
+	index := make(map[string]Week)
+	for _, w := range Weeks() {
+		index[w.Start] = w
 	}
-	loc := schedule.Location()
-	parts := make([]string, 0, len(weekStarts))
+	var chosen []Week
 	for _, s := range weekStarts {
-		t, err := time.ParseInLocation("2006-01-02", s, loc)
-		if err != nil {
-			continue
+		if w, ok := index[s]; ok {
+			chosen = append(chosen, w)
 		}
-		parts = append(parts, fmt.Sprintf("%d %s", t.Day(), t.Format("Jan")))
 	}
-	return "w/c " + strings.Join(parts, ", ")
+	sort.Slice(chosen, func(i, j int) bool { return chosen[i].Index < chosen[j].Index })
+
+	var runs []string
+	for i := 0; i < len(chosen); {
+		j := i
+		for j+1 < len(chosen) && chosen[j+1].Index == chosen[j].Index+1 {
+			j++
+		}
+		if i == j {
+			runs = append(runs, RangeLabel(chosen[i]))
+		} else {
+			runs = append(runs, dayMonth(chosen[i].Start)+" - "+dayMonth(chosen[j].End))
+		}
+		i = j + 1
+	}
+	return strings.Join(runs, ", ")
+}
+
+func dayMonth(date string) string {
+	t, err := time.ParseInLocation("2006-01-02", date, schedule.Location())
+	if err != nil {
+		return date
+	}
+	return fmt.Sprintf("%d %s", t.Day(), t.Format("Jan"))
 }

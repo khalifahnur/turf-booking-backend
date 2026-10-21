@@ -48,6 +48,10 @@ type CampRegistration struct {
 	Consent    CampConsent        `bson:"consent" json:"consent"`
 	Payment    CampPayment        `bson:"payment" json:"payment"`
 	Status     string             `bson:"status" json:"status"`
-	CreatedAt  time.Time          `bson:"createdAt" json:"createdAt"`
-	UpdatedAt  time.Time          `bson:"updatedAt" json:"updatedAt"`
+	// Duplicate is set when the same child ended up paid twice for a week (e.g. a
+	// late payment on an old prompt after a retry succeeded), so the owner can
+	// refund one of them.
+	Duplicate bool      `bson:"duplicate,omitempty" json:"duplicate,omitempty"`
+	CreatedAt time.Time `bson:"createdAt" json:"createdAt"`
+	UpdatedAt time.Time `bson:"updatedAt" json:"updatedAt"`
 }

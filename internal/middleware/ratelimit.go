@@ -95,10 +95,16 @@ func (l *Limiter) ByIP(proxyHops int, next http.Handler) http.Handler {
 
 // TooManyRequests writes a 429 with Retry-After.
 func TooManyRequests(w http.ResponseWriter, wait time.Duration) {
+	TooManyRequestsMessage(w, wait, "Too many requests, please slow down")
+}
+
+// TooManyRequestsMessage is TooManyRequests with wording suited to the caller,
+// for endpoints whose users are parents rather than programs.
+func TooManyRequestsMessage(w http.ResponseWriter, wait time.Duration, message string) {
 	secs := int(math.Ceil(wait.Seconds()))
 	if secs < 1 {
 		secs = 1
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
-	http.Error(w, "Too many requests, please slow down", http.StatusTooManyRequests)
+	http.Error(w, message, http.StatusTooManyRequests)
 }

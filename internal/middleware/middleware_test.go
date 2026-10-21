@@ -84,6 +84,39 @@ func TestLimiter(t *testing.T) {
 	}
 }
 
+func TestLimiterRefund(t *testing.T) {
+	l := NewLimiter(0.001, 2) // effectively no refill during the test
+	for i := 0; i < 2; i++ {
+		if ok, _ := l.Allow("k"); !ok {
+			t.Fatalf("attempt %d should be allowed", i)
+		}
+	}
+	if ok, _ := l.Allow("k"); ok {
+		t.Fatal("third attempt should be refused")
+	}
+	l.Refund("k")
+	if ok, _ := l.Allow("k"); !ok {
+		t.Error("a refunded token should allow one more attempt")
+	}
+	if ok, _ := l.Allow("k"); ok {
+		t.Error("a refund gives back one token, not more")
+	}
+	// Refunding more than was taken never lifts the bucket above its burst.
+	for i := 0; i < 5; i++ {
+		l.Refund("k")
+	}
+	allowed := 0
+	for i := 0; i < 5; i++ {
+		if ok, _ := l.Allow("k"); ok {
+			allowed++
+		}
+	}
+	if allowed != 2 {
+		t.Errorf("after over-refunding, %d attempts allowed; want the burst of 2", allowed)
+	}
+	l.Refund("never-seen") // must not panic or create state
+}
+
 func TestLimiterMemoryIsBounded(t *testing.T) {
 	l := NewLimiter(1, 1)
 	l.maxKeys = 100

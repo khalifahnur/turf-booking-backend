@@ -62,9 +62,9 @@ func NewCampHandler(store CampStore, cfg *config.Config, hub *ws.PaymentHub) *Ca
 		phoneLimiter: middleware.NewLimiter(0.3, 3), // 3 attempts, then one every ~3 minutes
 		pay:          services.InitiatePayment,
 		sendSMS: func(cfg *config.Config, reg models.CampRegistration) error {
-			p, _ := camp.LookupProgram(reg.Program)
+			what, when := campSMSDetails(reg)
 			return services.SendCampConfirmationSMS(cfg, reg.Parent.PhoneNumber, reg.Child.FullName,
-				p.Label, camp.WeeksLabel(reg.Weeks), reg.AmountKES)
+				what, when, reg.AmountKES)
 		},
 		notify: hub.NotifyClient,
 		now:    time.Now,
@@ -81,6 +81,16 @@ type campRegisterRequest struct {
 	Weeks         []string `json:"weeks"`
 	AcceptedTerms bool     `json:"acceptedTerms"`
 	TermsVersion  string   `json:"termsVersion"`
+}
+
+// campSMSDetails says what a registration bought and for when, for the
+// confirmation text: "Full day 8:30am - 4:00pm + lunch" and "2 Nov - 13 Nov".
+func campSMSDetails(reg models.CampRegistration) (what, when string) {
+	p, ok := camp.LookupProgram(reg.Program)
+	if !ok {
+		p = camp.Program{Label: reg.Program}
+	}
+	return camp.ProgramSummary(p, reg.Lunch), camp.WeeksLabel(reg.Weeks)
 }
 
 func newCampReference() (string, error) {
@@ -210,18 +220,28 @@ func (c *CampHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := c.Store.Insert(ctx, reg); err != nil {
 		log.Printf("[DB_ERROR] camp insert: %v", err)
+		c.phoneLimiter.Refund(phone) // nothing was sent, so this attempt should not count
 		http.Error(w, "We could not save your registration. You have not been charged. Please try again.", http.StatusInternalServerError)
 		return
 	}
 	unlock()
 
 	if _, err := c.pay(c.Config, phone, email, quote.TotalKES*100, reference); err != nil {
+		log.Printf("[PAYMENT_ERROR] camp: %v", err)
+		if errors.Is(err, services.ErrPaymentUncertain) {
+			// Paystack may have sent the prompt even though we did not hear back.
+			// The registration stays Pending, so the two-minute window still stops
+			// an immediate retry from sending a second prompt, and a payment that
+			// does arrive still settles it.
+			http.Error(w, "We could not confirm that the M-Pesa prompt was sent. Please check your phone: if a prompt arrived, enter your PIN and we will confirm by SMS. If nothing arrives, wait about 2 minutes and try again.", http.StatusBadGateway)
+			return
+		}
 		failCtx, failCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 		defer failCancel()
 		if _, ferr := c.Store.MarkFailed(failCtx, reference, c.now()); ferr != nil {
 			log.Printf("[DB_ERROR] camp mark failed: %v", ferr)
 		}
-		log.Printf("[PAYMENT_ERROR] camp: %v", err)
+		c.phoneLimiter.Refund(phone) // refused before any prompt went out
 		http.Error(w, "We could not send the M-Pesa prompt. You have not been charged. Please try again.", http.StatusBadGateway)
 		return
 	}
@@ -318,6 +338,12 @@ func (c *CampHandler) settle(ctx context.Context, w http.ResponseWriter, ev pays
 		log.Printf("[RECONCILE] camp reference %s was paid in %s, not KES; not settled\n", ref, ev.Currency)
 		w.WriteHeader(http.StatusOK)
 		return
+	}
+
+	if ev.AmountCents <= 0 {
+		// Settled below without checking the price, because refusing a payment
+		// Paystack confirmed is the worse mistake; say so, so it can be checked.
+		log.Printf("[RECONCILE] camp reference %s: charge.success carried no amount; settling without comparing it to the price\n", ref)
 	}
 
 	reg, err := c.Store.MarkPaid(ctx, ref, ev.AmountCents, c.now())

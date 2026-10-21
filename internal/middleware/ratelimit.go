@@ -64,6 +64,16 @@ func (l *Limiter) Allow(key string) (ok bool, retryAfter time.Duration) {
 	return false, wait
 }
 
+// Refund gives back a token taken by Allow, for work that failed before it had
+// any effect on the caller (so the failure should not count against them).
+func (l *Limiter) Refund(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b, ok := l.buckets[key]; ok {
+		b.tokens = math.Min(l.burst, b.tokens+1)
+	}
+}
+
 // sweep drops buckets that have refilled completely: recreating one later is
 // indistinguishable from keeping it. Caller holds l.mu.
 func (l *Limiter) sweep(now time.Time) {

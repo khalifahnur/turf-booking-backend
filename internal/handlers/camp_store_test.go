@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -149,5 +150,58 @@ func TestOverlapReturnsSortedRequestedWeeksOnly(t *testing.T) {
 	}
 	if got := overlap([]string{"2026-11-09"}, regs); len(got) != 0 {
 		t.Errorf("no overlap should be empty, got %v", got)
+	}
+}
+
+// Names alone would let a typo'd value through: an update that wrote the wrong
+// status, or a filter that forgot one of its keys, would still "use real fields".
+func TestCampUpdatesWriteTheRightValues(t *testing.T) {
+	now := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	set := func(u bson.M) bson.M { return u["$set"].(bson.M) }
+
+	paid := set(markPaidUpdate(250_000, now))
+	if paid["status"] != camp.StatusPaid || paid["payment.paidAmountCents"] != int64(250_000) || paid["payment.paidAt"] != now || paid["updatedAt"] != now {
+		t.Errorf("markPaidUpdate = %v", paid)
+	}
+	failed := set(markFailedUpdate(now))
+	if failed["status"] != camp.StatusFailed || failed["updatedAt"] != now || len(failed) != 2 {
+		t.Errorf("markFailedUpdate = %v", failed)
+	}
+	if dup := set(duplicateUpdate()); dup["duplicate"] != true || len(dup) != 1 {
+		t.Errorf("duplicateUpdate = %v", dup)
+	}
+}
+
+func TestCampFiltersKeepEveryKey(t *testing.T) {
+	weeks := []string{"2026-11-02"}
+	keys := func(f bson.M) []string {
+		var out []string
+		for k := range f {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+	// The key set is the rule: dropping child.key, the phone or the weeks widens
+	// the match to other families' children.
+	for name, f := range map[string]bson.M{
+		"conflictFilter":         conflictFilter("k", "p", weeks, time.Now()),
+		"paidSharingWeeksFilter": paidSharingWeeksFilter("k", "p", weeks),
+	} {
+		if got := strings.Join(keys(f), ","); !strings.Contains(got, "child.key") || !strings.Contains(got, "parent.phoneNumber") || !strings.Contains(got, "weeks") {
+			t.Errorf("%s keys = %s", name, got)
+		}
+		if f["child.key"] != "k" || f["parent.phoneNumber"] != "p" || !reflect.DeepEqual(f["weeks"], bson.M{"$in": weeks}) {
+			t.Errorf("%s does not match on the child, the phone and the weeks: %v", name, f)
+		}
+	}
+	if got := strings.Join(keys(markPaidFilter("r", 1)), ","); got != "$expr,payment.reference,status" {
+		t.Errorf("markPaidFilter keys = %s", got)
+	}
+	if f := markPaidFilter("camp-r", 1); f["payment.reference"] != "camp-r" {
+		t.Errorf("markPaid must match on the reference, got %v", f)
+	}
+	if f := markFailedFilter("camp-r"); f["payment.reference"] != "camp-r" || len(f) != 2 {
+		t.Errorf("markFailedFilter = %v", f)
 	}
 }

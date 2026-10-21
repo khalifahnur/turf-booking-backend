@@ -63,7 +63,7 @@ func main() {
 	bookLimit := middleware.NewLimiter(6, 5)
 	wsLimit := middleware.NewLimiter(30, 10)
 	adminLimit := middleware.NewLimiter(30, 10)
-	campLimit := middleware.NewLimiter(60, 20)
+	campLimit := middleware.NewLimiter(20, 10)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/v1/bookings", readLimit.ByIP(hops, http.HandlerFunc(bookingHandler.GetBookings)))

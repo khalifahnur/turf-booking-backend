@@ -116,5 +116,5 @@ func TooManyRequestsMessage(w http.ResponseWriter, wait time.Duration, message s
 		secs = 1
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
-	http.Error(w, message, http.StatusTooManyRequests)
+	UserError(w, message, http.StatusTooManyRequests)
 }

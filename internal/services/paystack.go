@@ -99,7 +99,9 @@ func InitiatePayment(cfg *config.Config, phone string, email string, amount int,
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		if resp.StatusCode >= 500 {
+		// Only an outright refusal (a 4xx, other than a request timeout) proves that
+		// no prompt was sent; anything else (5xx, 408, an unexpected 1xx/2xx/3xx) leaves it open.
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode < 400 {
 			return "", fmt.Errorf("%w: paystack error (Status %d): %s", ErrPaymentUncertain, resp.StatusCode, string(body))
 		}
 		return "", fmt.Errorf("paystack error (Status %d): %s", resp.StatusCode, string(body))

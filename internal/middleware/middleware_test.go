@@ -115,6 +115,31 @@ func TestLimiterRefund(t *testing.T) {
 		t.Errorf("after over-refunding, %d attempts allowed; want the burst of 2", allowed)
 	}
 	l.Refund("never-seen") // must not panic or create state
+	if _, made := l.buckets["never-seen"]; made {
+		t.Error("refunding an unknown key must not create a bucket")
+	}
+}
+
+func TestUserErrorMarksTheResponseAndCORSExposesIt(t *testing.T) {
+	rec := httptest.NewRecorder()
+	UserError(rec, "Please check your phone.", http.StatusBadGateway)
+	if rec.Code != http.StatusBadGateway || rec.Header().Get(UserMessageHeader) != "1" || rec.Body.String() != "Please check your phone.\n" {
+		t.Errorf("UserError = %d %v %q", rec.Code, rec.Header(), rec.Body.String())
+	}
+	if plain := httptest.NewRecorder(); func() bool { http.Error(plain, "x", 502); return plain.Header().Get(UserMessageHeader) != "" }() {
+		t.Error("an ordinary http.Error must not carry the marker")
+	}
+
+	h := CORS([]string{"https://site.example"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		UserError(w, "Nope.", http.StatusConflict)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("Origin", "https://site.example")
+	out := httptest.NewRecorder()
+	h.ServeHTTP(out, req)
+	if got := out.Header().Get("Access-Control-Expose-Headers"); got != UserMessageHeader {
+		t.Errorf("Access-Control-Expose-Headers = %q: the browser could not read the marker", got)
+	}
 }
 
 func TestLimiterMemoryIsBounded(t *testing.T) {

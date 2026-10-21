@@ -105,7 +105,7 @@ func newCampReference() (string, error) {
 // sends the parent an M-Pesa prompt.
 func (c *CampHandler) Register(w http.ResponseWriter, r *http.Request) {
 	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
-		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		middleware.UserError(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
 		return
 	}
 
@@ -114,60 +114,60 @@ func (c *CampHandler) Register(w http.ResponseWriter, r *http.Request) {
 	if err := dec.Decode(&req); err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			http.Error(w, "Request too large", http.StatusRequestEntityTooLarge)
+			middleware.UserError(w, "Request too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		middleware.UserError(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 	if dec.More() {
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		middleware.UserError(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 
 	childName, err := validate.Name(req.ChildName)
 	if err != nil {
-		http.Error(w, "Child's "+err.Error(), http.StatusBadRequest)
+		middleware.UserError(w, "Child's "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	parentName, err := validate.Name(req.ParentName)
 	if err != nil {
-		http.Error(w, "Parent's "+err.Error(), http.StatusBadRequest)
+		middleware.UserError(w, "Parent's "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	email, err := validate.Email(req.Email)
 	if err != nil {
-		http.Error(w, capitalise(err.Error()), http.StatusBadRequest)
+		middleware.UserError(w, capitalise(err.Error()), http.StatusBadRequest)
 		return
 	}
 	phone, err := validate.KenyanMobile(req.PhoneNumber)
 	if err != nil {
-		http.Error(w, capitalise(err.Error()), http.StatusBadRequest)
+		middleware.UserError(w, capitalise(err.Error()), http.StatusBadRequest)
 		return
 	}
 
 	// The waiver is a condition of registering, so it is checked here and not
 	// only in the form.
 	if !req.AcceptedTerms {
-		http.Error(w, "Please accept the terms and conditions to continue", http.StatusBadRequest)
+		middleware.UserError(w, "Please accept the terms and conditions to continue", http.StatusBadRequest)
 		return
 	}
 	if req.TermsVersion != camp.TermsVersion {
-		http.Error(w, "The terms and conditions have been updated. Please refresh the page and accept them again", http.StatusConflict)
+		middleware.UserError(w, "The terms and conditions have been updated. Please refresh the page and accept them again", http.StatusConflict)
 		return
 	}
 
 	now := c.now()
 	quote, err := camp.NewQuote(req.Program, req.Lunch, req.Weeks, now)
 	if err != nil {
-		http.Error(w, capitalise(err.Error()), http.StatusBadRequest)
+		middleware.UserError(w, capitalise(err.Error()), http.StatusBadRequest)
 		return
 	}
 
 	reference, err := newCampReference()
 	if err != nil {
 		log.Printf("[RAND_ERROR] %v", err)
-		http.Error(w, "We could not start your registration. You have not been charged. Please try again.", http.StatusInternalServerError)
+		middleware.UserError(w, "We could not start your registration. You have not been charged. Please try again.", http.StatusInternalServerError)
 		return
 	}
 
@@ -186,11 +186,11 @@ func (c *CampHandler) Register(w http.ResponseWriter, r *http.Request) {
 	taken, err := c.Store.Conflicts(ctx, childKey, phone, quote.Weeks, now.Add(-campPendingWindow))
 	if err != nil {
 		log.Printf("[DB_ERROR] camp conflicts: %v", err)
-		http.Error(w, "We could not check your registration. You have not been charged. Please try again.", http.StatusInternalServerError)
+		middleware.UserError(w, "We could not check your registration. You have not been charged. Please try again.", http.StatusInternalServerError)
 		return
 	}
 	if len(taken) > 0 {
-		http.Error(w, fmt.Sprintf("%s is already registered, or has a payment in progress, for: %s. Please check the weeks you chose or wait a moment.",
+		middleware.UserError(w, fmt.Sprintf("%s is already registered, or has a payment in progress, for: %s. Please check the weeks you chose or wait a moment.",
 			childName, weekList(taken)), http.StatusConflict)
 		return
 	}
@@ -221,7 +221,7 @@ func (c *CampHandler) Register(w http.ResponseWriter, r *http.Request) {
 	if err := c.Store.Insert(ctx, reg); err != nil {
 		log.Printf("[DB_ERROR] camp insert: %v", err)
 		c.phoneLimiter.Refund(phone) // nothing was sent, so this attempt should not count
-		http.Error(w, "We could not save your registration. You have not been charged. Please try again.", http.StatusInternalServerError)
+		middleware.UserError(w, "We could not save your registration. You have not been charged. Please try again.", http.StatusInternalServerError)
 		return
 	}
 	unlock()
@@ -233,7 +233,7 @@ func (c *CampHandler) Register(w http.ResponseWriter, r *http.Request) {
 			// The registration stays Pending, so the two-minute window still stops
 			// an immediate retry from sending a second prompt, and a payment that
 			// does arrive still settles it.
-			http.Error(w, "We could not confirm that the M-Pesa prompt was sent. Please check your phone: if a prompt arrived, enter your PIN and we will confirm by SMS. If nothing arrives, wait about 2 minutes and try again.", http.StatusBadGateway)
+			middleware.UserError(w, "We could not confirm that the M-Pesa prompt was sent. Please check your phone: if a prompt arrived, enter your PIN and we will confirm by SMS. If nothing arrives, wait about 2 minutes and try again.", http.StatusBadGateway)
 			return
 		}
 		failCtx, failCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
@@ -242,7 +242,7 @@ func (c *CampHandler) Register(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[DB_ERROR] camp mark failed: %v", ferr)
 		}
 		c.phoneLimiter.Refund(phone) // refused before any prompt went out
-		http.Error(w, "We could not send the M-Pesa prompt. You have not been charged. Please try again.", http.StatusBadGateway)
+		middleware.UserError(w, "We could not send the M-Pesa prompt. You have not been charged. Please try again.", http.StatusBadGateway)
 		return
 	}
 

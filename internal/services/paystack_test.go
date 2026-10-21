@@ -34,6 +34,23 @@ func TestInitiatePaymentClassifiesFailures(t *testing.T) {
 		{"server error (500)", func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "boom", http.StatusInternalServerError)
 		}, true, true},
+		{"unavailable (503)", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		}, true, true},
+		{"request timeout (408)", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "slow", http.StatusRequestTimeout)
+		}, true, true},
+		{"rate limited (429)", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+		}, false, true},
+		{"unexpected 3xx", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusMultipleChoices)
+		}, true, true},
+		{"body cut off mid-read", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", "500")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":true`))
+		}, true, true},
 		{"bad gateway (502)", func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 		}, true, true},

@@ -22,7 +22,7 @@ const (
 	// is not this one, so a stale browser tab cannot record agreement to
 	// wording that has since changed. Bump it together with the text in the
 	// frontend (lib/camp.ts) whenever the terms change.
-	TermsVersion = "camp-2026-v2"
+	TermsVersion = "camp-2026-v3"
 
 	// ReferencePrefix marks a Paystack reference as a camp payment, which is how
 	// the shared webhook and payment WebSocket tell camp payments from pitch
@@ -209,7 +209,7 @@ func FormatKES(n int) string {
 
 // ProgramSummary describes what was bought: "Full day 8:30am - 4:00pm + lunch".
 func ProgramSummary(p Program, lunch bool) string {
-	s := p.Label + " " + p.Hours
+	s := strings.TrimSpace(p.Label + " " + p.Hours)
 	if lunch {
 		s += " + lunch"
 	}

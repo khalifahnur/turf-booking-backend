@@ -1185,3 +1185,100 @@ func TestSharedWebhookCarriesStatusAndCurrency(t *testing.T) {
 		t.Errorf("the full price through the real webhook = %+v", r)
 	}
 }
+
+// Every refusal Register writes is meant for a parent, so each carries the marker
+// that lets the frontend show it as it is (a proxy's error page never does).
+func TestCampRegisterErrorsAreMarkedForParents(t *testing.T) {
+	rig := newCampRig()
+	rig.h.phoneLimiter = middleware.NewLimiter(0.001, 1)
+	check := func(name string, rec *httptest.ResponseRecorder, want int) {
+		t.Helper()
+		if rec.Code != want {
+			t.Errorf("%s: status = %d, want %d", name, rec.Code, want)
+		}
+		if rec.Header().Get(middleware.UserMessageHeader) != "1" {
+			t.Errorf("%s: response carries no %s marker (%q)", name, middleware.UserMessageHeader, rec.Body.String())
+		}
+	}
+	check("validation", rig.register(goodBody(body{"email": "nope"})), 400)
+	check("terms", rig.register(goodBody(body{"acceptedTerms": false})), 400)
+	check("stale terms", rig.register(goodBody(body{"termsVersion": "old"})), 409)
+	check("media type", rig.registerRaw("text/plain", "{}"), 415)
+	check("bad json", rig.registerRaw("application/json", "{"), 400)
+	check("too large", rig.registerRaw("application/json", `{"childName":"`+strings.Repeat("a", 20_000)+`"}`), 413)
+	if rec := rig.register(goodBody(nil)); rec.Code != 201 {
+		t.Fatalf("first = %d", rec.Code)
+	}
+	check("duplicate", rig.register(goodBody(nil)), 409)
+	check("rate limit", rig.register(goodBody(body{"childName": "Baraka Otieno"})), 429)
+
+	rig = newCampRig()
+	rig.payErr = errors.New("refused")
+	check("definite pay failure", rig.register(goodBody(nil)), 502)
+	rig = newCampRig()
+	rig.payErr = fmt.Errorf("%w: timeout", services.ErrPaymentUncertain)
+	check("uncertain pay failure", rig.register(goodBody(nil)), 502)
+	rig = newCampRig()
+	rig.h.Store = &failingInsertStore{memCampStore: rig.store}
+	check("insert failure", rig.register(goodBody(nil)), 500)
+
+	// A successful response is not an error and carries no marker.
+	if rec := newCampRig().register(goodBody(nil)); rec.Header().Get(middleware.UserMessageHeader) != "" {
+		t.Error("a 201 must not carry the user-message marker")
+	}
+}
+
+// The frontend shows these messages in a small banner; the longest one must stay
+// within the length it is willing to show (400 characters).
+func TestCampLongestConflictMessageFitsTheBanner(t *testing.T) {
+	rig := newCampRig()
+	every := make([]string, 0, 7)
+	for _, w := range camp.Weeks() {
+		every = append(every, w.Start)
+	}
+	name := strings.Repeat("Abcdefghi ", 6)[:59] + "z" // exactly 60 characters
+	if rec := rig.register(goodBody(body{"childName": name, "weeks": every})); rec.Code != 201 {
+		t.Fatalf("first = %d: %s", rec.Code, rec.Body.String())
+	}
+	rec := rig.register(goodBody(body{"childName": name, "weeks": every}))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("repeat = %d", rec.Code)
+	}
+	msg := strings.TrimSpace(rec.Body.String())
+	if len(msg) > 400 {
+		t.Errorf("the longest conflict message is %d characters: %q", len(msg), msg)
+	}
+	if !strings.Contains(msg, "week 7") || !strings.Contains(msg, "week 1") {
+		t.Errorf("it should name every week: %q", msg)
+	}
+}
+
+// Three real registrations use the burst; a failed attempt is refunded exactly
+// once, so exactly one more is allowed afterwards, not two.
+func TestCampDefiniteFailureRefundsExactlyOneToken(t *testing.T) {
+	rig := newCampRig()
+	rig.h.phoneLimiter = middleware.NewLimiter(0.001, 3)
+	for _, n := range []string{"Amani Otieno", "Baraka Otieno"} {
+		if rec := rig.register(goodBody(body{"childName": n})); rec.Code != 201 {
+			t.Fatalf("%s = %d", n, rec.Code)
+		}
+	}
+	rig.payErr = errors.New("refused")
+	if rec := rig.register(goodBody(body{"childName": "Chebet Otieno"})); rec.Code != http.StatusBadGateway {
+		t.Fatalf("failing attempt = %d", rec.Code)
+	}
+	rig.payErr = nil
+	if rec := rig.register(goodBody(body{"childName": "Daudi Otieno"})); rec.Code != 201 {
+		t.Errorf("the refunded attempt should allow one more registration, got %d", rec.Code)
+	}
+	if rec := rig.register(goodBody(body{"childName": "Ema Otieno"})); rec.Code != http.StatusTooManyRequests {
+		t.Errorf("a failure must be refunded once, not twice: got %d, want 429", rec.Code)
+	}
+}
+
+func TestCampSMSDetailsForAnUnknownProgramme(t *testing.T) {
+	what, when := campSMSDetails(models.CampRegistration{Program: "retired", Lunch: true, Weeks: []string{"2026-11-02"}})
+	if what != "retired + lunch" || when != "2-6 Nov" {
+		t.Errorf("what, when = %q, %q", what, when)
+	}
+}

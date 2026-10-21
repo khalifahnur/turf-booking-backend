@@ -208,4 +208,7 @@ func TestFormatKESAndProgramSummary(t *testing.T) {
 	if got := ProgramSummary(half, false); got != "Half day 8:30am - 12:30pm" {
 		t.Errorf("summary = %q", got)
 	}
+	if got := ProgramSummary(Program{Label: "Retired"}, true); got != "Retired + lunch" {
+		t.Errorf("a programme with no hours = %q, want no stray space", got)
+	}
 }

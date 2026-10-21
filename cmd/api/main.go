@@ -25,7 +25,7 @@ func main() {
 		log.Fatalf("Refusing to start: %v", err)
 	}
 	if cfg.AdminAPIKey == "" {
-		log.Println("ADMIN_API_KEY is not set: the admin bookings endpoint is disabled")
+		log.Println("ADMIN_API_KEY is not set: the admin endpoints (bookings and camp registrations) are disabled")
 	}
 
 	port := cfg.Port

@@ -54,3 +54,35 @@ func EnsureIndexes(collection *mongo.Collection) {
 		log.Printf("[DB] could not ensure indexes: %v", err)
 	}
 }
+
+// EnsureCampIndexes keeps payment references unique and the duplicate-
+// registration lookup and admin list fast. As with the booking indexes, a
+// failure is logged rather than fatal.
+func EnsureCampIndexes(collection *mongo.Collection) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := collection.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "payment.reference", Value: 1}},
+			Options: options.Index().SetUnique(true).SetName("uniq_payment_reference"),
+		},
+		{
+			Keys: bson.D{
+				{Key: "child.key", Value: 1},
+				{Key: "parent.phoneNumber", Value: 1},
+			},
+			Options: options.Index().SetName("child_phone"),
+		},
+		{
+			Keys: bson.D{
+				{Key: "status", Value: 1},
+				{Key: "createdAt", Value: -1},
+			},
+			Options: options.Index().SetName("status_created"),
+		},
+	})
+	if err != nil {
+		log.Printf("[DB] could not ensure camp indexes: %v", err)
+	}
+}

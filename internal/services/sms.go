@@ -36,15 +36,26 @@ func FormatPhoneE164(phone string) string {
 	return cleaned
 }
 
+const directionsLink = "https://maps.app.goo.gl/XjfyKBvQyhBifDBCA?g_st=ac"
+
 func SendConfirmationSMS(cfg *config.Config, phone, name, date, timeSlot string) error {
+	message := fmt.Sprintf("Confirmed! %s, your pitch is booked @ %s Date: %s. Directions: %s", name, timeSlot, date, directionsLink)
+	return sendSMS(cfg, phone, message)
+}
+
+// SendCampConfirmationSMS tells a parent their child's camp place is paid for.
+func SendCampConfirmationSMS(cfg *config.Config, phone, child, programLabel, weeksLabel string, totalKES int) error {
+	message := fmt.Sprintf("Confirmed! %s is registered for the K-Arena Holiday Camp (%s, %s). Paid Ksh %d. Directions: %s",
+		child, programLabel, weeksLabel, totalKES, directionsLink)
+	return sendSMS(cfg, phone, message)
+}
+
+func sendSMS(cfg *config.Config, phone, message string) error {
 	formattedPhone := FormatPhoneE164(phone)
 
 	if formattedPhone == "" {
 		return fmt.Errorf("cannot send SMS: phone number is empty")
 	}
-
-	directionsLink := "https://maps.app.goo.gl/XjfyKBvQyhBifDBCA?g_st=ac"
-	message := fmt.Sprintf("Confirmed! %s, your pitch is booked @ %s Date: %s. Directions: %s", name, timeSlot, date, directionsLink)
 
 	data := url.Values{}
 	data.Set("username", cfg.ATUsername)

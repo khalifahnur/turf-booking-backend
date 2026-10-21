@@ -48,6 +48,13 @@ func main() {
 
 	bookingHandler := handlers.NewBookingHandler(collection, cfg, hub)
 
+	campCollection := mongoClient.Database("arena").Collection("camp_registrations")
+	db.EnsureCampIndexes(campCollection)
+	services.StartCampCleanupWorker(campCollection)
+	campHandler := handlers.NewCampHandler(handlers.NewMongoCampStore(campCollection), cfg, hub)
+	// The Paystack webhook and the payment WebSocket are shared with the camp.
+	bookingHandler.AttachCamp(campHandler)
+
 	// One bucket per client IP for each class of endpoint. The numbers leave
 	// plenty of room for a busy shared network (the calendar polls every 3s) but
 	// stop a single source from hammering the database or the payment gateway.
@@ -56,11 +63,14 @@ func main() {
 	bookLimit := middleware.NewLimiter(6, 5)
 	wsLimit := middleware.NewLimiter(30, 10)
 	adminLimit := middleware.NewLimiter(30, 10)
+	campLimit := middleware.NewLimiter(6, 5)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/v1/bookings", readLimit.ByIP(hops, http.HandlerFunc(bookingHandler.GetBookings)))
 	mux.Handle("GET /api/v1/admin/bookings", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.GetBookingsAdmin)))
 	mux.Handle("POST /api/v1/initiate/paystack/push-stk", bookLimit.ByIP(hops, http.HandlerFunc(bookingHandler.InitiateBooking)))
+	mux.Handle("POST /api/v1/camp/register", campLimit.ByIP(hops, http.HandlerFunc(campHandler.Register)))
+	mux.Handle("GET /api/v1/admin/camp/registrations", adminLimit.ByIP(hops, campHandler.AdminOnly(campHandler.ListAdmin)))
 	// Authenticated by Paystack's HMAC signature, so it is not IP-limited:
 	// legitimate retries must never be throttled.
 	mux.HandleFunc("POST /api/v1/webhook/paystack", bookingHandler.PaystackWebhook)

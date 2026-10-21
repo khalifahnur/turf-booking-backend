@@ -1109,6 +1109,12 @@ func TestCampFailedAttemptsGiveBackTheRateLimitToken(t *testing.T) {
 	}
 }
 
+type failingConflictsStore struct{ *memCampStore }
+
+func (failingConflictsStore) Conflicts(context.Context, string, string, []string, time.Time) ([]string, error) {
+	return nil, errors.New("db down")
+}
+
 type failingInsertStore struct{ *memCampStore }
 
 func (failingInsertStore) Insert(context.Context, models.CampRegistration) error {
@@ -1221,6 +1227,9 @@ func TestCampRegisterErrorsAreMarkedForParents(t *testing.T) {
 	rig = newCampRig()
 	rig.h.Store = &failingInsertStore{memCampStore: rig.store}
 	check("insert failure", rig.register(goodBody(nil)), 500)
+	rig = newCampRig()
+	rig.h.Store = &failingConflictsStore{memCampStore: rig.store}
+	check("duplicate-check failure", rig.register(goodBody(nil)), 500)
 
 	// A successful response is not an error and carries no marker.
 	if rec := newCampRig().register(goodBody(nil)); rec.Header().Get(middleware.UserMessageHeader) != "" {
@@ -1248,8 +1257,23 @@ func TestCampLongestConflictMessageFitsTheBanner(t *testing.T) {
 	if len(msg) > 400 {
 		t.Errorf("the longest conflict message is %d characters: %q", len(msg), msg)
 	}
-	if !strings.Contains(msg, "week 7") || !strings.Contains(msg, "week 1") {
-		t.Errorf("it should name every week: %q", msg)
+	if !strings.Contains(msg, "weeks 1-7 (2 Nov - 18 Dec)") {
+		t.Errorf("seven consecutive weeks should read as one range: %q", msg)
+	}
+
+	// The worst case for length is every other week: nothing joins up.
+	rig = newCampRig()
+	alternate := []string{every[0], every[2], every[4], every[6]}
+	rig.register(goodBody(body{"childName": name, "weeks": alternate}))
+	rec = rig.register(goodBody(body{"childName": name, "weeks": alternate}))
+	msg = strings.TrimSpace(rec.Body.String())
+	if rec.Code != http.StatusConflict || len(msg) > 300 {
+		t.Errorf("alternate weeks: %d, %d characters: %q", rec.Code, len(msg), msg)
+	}
+	for _, want := range []string{"week 1 (2-6 Nov)", "week 3 (16-20 Nov)", "week 5 (30 Nov - 4 Dec)", "week 7 (14-18 Dec)"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("it should name %q: %q", want, msg)
+		}
 	}
 }
 

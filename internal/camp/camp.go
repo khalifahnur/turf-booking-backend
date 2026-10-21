@@ -220,9 +220,38 @@ func ProgramSummary(p Program, lunch bool) string {
 // Consecutive weeks are joined into one range, so the whole camp reads
 // "2 Nov - 18 Dec" and weeks 1, 2 and 4 read "2 Nov - 13 Nov, 23-27 Nov".
 func WeeksLabel(weekStarts []string) string {
-	if len(weekStarts) == 0 {
-		return ""
+	runs := weekRuns(weekStarts)
+	labels := make([]string, len(runs))
+	for i, r := range runs {
+		labels[i] = r.label
 	}
+	return strings.Join(labels, ", ")
+}
+
+// WeekRunsLabel names the weeks for an error message, joining consecutive ones so
+// that seven weeks read "weeks 1-7 (2 Nov - 18 Dec)" rather than seven entries:
+// "week 1 (2-6 Nov), weeks 3-4 (16 Nov - 27 Nov)".
+func WeekRunsLabel(weekStarts []string) string {
+	runs := weekRuns(weekStarts)
+	parts := make([]string, len(runs))
+	for i, r := range runs {
+		if r.first == r.last {
+			parts[i] = fmt.Sprintf("week %d (%s)", r.first, r.label)
+		} else {
+			parts[i] = fmt.Sprintf("weeks %d-%d (%s)", r.first, r.last, r.label)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+type weekRun struct {
+	first, last int // week numbers
+	label       string
+}
+
+// weekRuns sorts the known weeks among weekStarts and joins consecutive ones.
+// Dates that are not camp weeks are ignored.
+func weekRuns(weekStarts []string) []weekRun {
 	index := make(map[string]Week)
 	for _, w := range Weeks() {
 		index[w.Start] = w
@@ -235,20 +264,22 @@ func WeeksLabel(weekStarts []string) string {
 	}
 	sort.Slice(chosen, func(i, j int) bool { return chosen[i].Index < chosen[j].Index })
 
-	var runs []string
+	var runs []weekRun
 	for i := 0; i < len(chosen); {
 		j := i
 		for j+1 < len(chosen) && chosen[j+1].Index == chosen[j].Index+1 {
 			j++
 		}
+		r := weekRun{first: chosen[i].Index, last: chosen[j].Index}
 		if i == j {
-			runs = append(runs, RangeLabel(chosen[i]))
+			r.label = RangeLabel(chosen[i])
 		} else {
-			runs = append(runs, dayMonth(chosen[i].Start)+" - "+dayMonth(chosen[j].End))
+			r.label = dayMonth(chosen[i].Start) + " - " + dayMonth(chosen[j].End)
 		}
+		runs = append(runs, r)
 		i = j + 1
 	}
-	return strings.Join(runs, ", ")
+	return runs
 }
 
 func dayMonth(date string) string {

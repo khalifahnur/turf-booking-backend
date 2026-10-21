@@ -194,6 +194,30 @@ func TestWeeksLabel(t *testing.T) {
 	}
 }
 
+func TestWeekRunsLabel(t *testing.T) {
+	all := make([]string, 0, 7)
+	for _, w := range Weeks() {
+		all = append(all, w.Start)
+	}
+	for _, c := range []struct {
+		name  string
+		weeks []string
+		want  string
+	}{
+		{"none", nil, ""},
+		{"one week", []string{"2026-11-02"}, "week 1 (2-6 Nov)"},
+		{"one week across a month", []string{"2026-11-30"}, "week 5 (30 Nov - 4 Dec)"},
+		{"two consecutive", []string{"2026-11-09", "2026-11-02"}, "weeks 1-2 (2 Nov - 13 Nov)"},
+		{"a gap", []string{"2026-11-02", "2026-11-09", "2026-11-23"}, "weeks 1-2 (2 Nov - 13 Nov), week 4 (23-27 Nov)"},
+		{"the whole camp", all, "weeks 1-7 (2 Nov - 18 Dec)"},
+		{"unknown dates are ignored", []string{"2026-11-03", "2026-11-16"}, "week 3 (16-20 Nov)"},
+	} {
+		if got := WeekRunsLabel(c.weeks); got != c.want {
+			t.Errorf("%s: WeekRunsLabel = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func TestFormatKESAndProgramSummary(t *testing.T) {
 	for n, want := range map[int]string{0: "Ksh 0", 100: "Ksh 100", 1500: "Ksh 1,500", 3000: "Ksh 3,000", 17500: "Ksh 17,500", 1234567: "Ksh 1,234,567"} {
 		if got := FormatKES(n); got != want {

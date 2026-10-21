@@ -24,9 +24,6 @@ func SecurityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// CORS lets only the listed browser origins call the API. It sends no
-// Allow-Credentials: the API has no cookie sessions, so cross-origin pages
-// have no reason to attach any.
 // UserMessageHeader marks a response whose body was written for the person
 // using the site, so the frontend may show it as it is. Error pages from a proxy
 // or a platform never carry it, which is how the two are told apart.
@@ -39,6 +36,9 @@ func UserError(w http.ResponseWriter, message string, status int) {
 	http.Error(w, message, status)
 }
 
+// CORS lets only the listed browser origins call the API. It sends no
+// Allow-Credentials: the API has no cookie sessions, so cross-origin pages
+// have no reason to attach any.
 func CORS(allowedOrigins []string, next http.Handler) http.Handler {
 	allowed := make(map[string]struct{}, len(allowedOrigins))
 	for _, o := range allowedOrigins {

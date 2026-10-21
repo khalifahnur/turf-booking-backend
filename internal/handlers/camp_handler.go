@@ -191,7 +191,7 @@ func (c *CampHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(taken) > 0 {
 		middleware.UserError(w, fmt.Sprintf("%s is already registered, or has a payment in progress, for: %s. Please check the weeks you chose or wait a moment.",
-			childName, weekList(taken)), http.StatusConflict)
+			childName, camp.WeekRunsLabel(taken)), http.StatusConflict)
 		return
 	}
 
@@ -262,25 +262,6 @@ func capitalise(msg string) string {
 	}
 	r, size := utf8.DecodeRuneInString(msg)
 	return string(unicode.ToUpper(r)) + msg[size:]
-}
-
-// weekList renders week-start dates as "2 Nov, 9 Nov" for an error message.
-func weekList(weeks []string) string {
-	labels := make([]string, 0, len(weeks))
-	for _, start := range weeks {
-		var found bool
-		for _, wk := range camp.Weeks() {
-			if wk.Start == start {
-				labels = append(labels, fmt.Sprintf("week %d (%s)", wk.Index, camp.RangeLabel(wk)))
-				found = true
-				break
-			}
-		}
-		if !found {
-			labels = append(labels, start)
-		}
-	}
-	return strings.Join(labels, ", ")
 }
 
 // paystackEvent is the part of a verified Paystack webhook that camp payments

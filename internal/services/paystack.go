@@ -3,6 +3,7 @@ package services
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +33,19 @@ type PaystackChargeResponse struct {
 		DisplayText string `json:"display_text"`
 	} `json:"data"`
 }
+
+// ErrPaymentUncertain wraps a failure after which Paystack may nonetheless have
+// sent the M-Pesa prompt (a timeout, a dropped connection, a 5xx, a garbled
+// answer). Callers must not tell the customer they were not charged, and must
+// not let them retry straight away. A failure that is not wrapped this way is
+// definite: Paystack refused the request, or it never left this server.
+var ErrPaymentUncertain = errors.New("the M-Pesa prompt may have been sent")
+
+// Overridable so tests can point the charge at a local server.
+var (
+	paystackChargeURL = "https://api.paystack.co/charge"
+	paystackTimeout   = 10 * time.Second
+)
 
 func formatPhoneNumber(phone string) string {
 	phone = strings.ReplaceAll(phone, " ", "")
@@ -64,7 +78,7 @@ func InitiatePayment(cfg *config.Config, phone string, email string, amount int,
 		return "", fmt.Errorf("failed to marshal payload: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://api.paystack.co/charge", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", paystackChargeURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("error creating request: %w", err)
 	}
@@ -72,25 +86,30 @@ func InitiatePayment(cfg *config.Config, phone string, email string, amount int,
 	req.Header.Set("Authorization", "Bearer "+cfg.PaystackSK)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: paystackTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("api request failed: %w", err)
+		return "", fmt.Errorf("%w: api request failed: %v", ErrPaymentUncertain, err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "", fmt.Errorf("error reading response body: %w", err)
+		return "", fmt.Errorf("%w: error reading response body: %v", ErrPaymentUncertain, err)
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		// Only an outright refusal (a 4xx, other than a request timeout) proves that
+		// no prompt was sent; anything else (5xx, 408, an unexpected 1xx/2xx/3xx) leaves it open.
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode < 400 {
+			return "", fmt.Errorf("%w: paystack error (Status %d): %s", ErrPaymentUncertain, resp.StatusCode, string(body))
+		}
 		return "", fmt.Errorf("paystack error (Status %d): %s", resp.StatusCode, string(body))
 	}
 
 	var result PaystackChargeResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("error unmarshaling response: %w", err)
+		return "", fmt.Errorf("%w: error unmarshaling response: %v", ErrPaymentUncertain, err)
 	}
 
 	if !result.Status {

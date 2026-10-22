@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"turf-booking-backend/internal/camp"
 	"turf-booking-backend/internal/config"
 )
 
@@ -36,15 +37,31 @@ func FormatPhoneE164(phone string) string {
 	return cleaned
 }
 
+const directionsLink = "https://maps.app.goo.gl/XjfyKBvQyhBifDBCA?g_st=ac"
+
 func SendConfirmationSMS(cfg *config.Config, phone, name, date, timeSlot string) error {
+	message := fmt.Sprintf("Confirmed! %s, your pitch is booked @ %s Date: %s. Directions: %s", name, timeSlot, date, directionsLink)
+	return sendSMS(cfg, phone, message)
+}
+
+// SendCampConfirmationSMS tells a parent their child's camp place is paid for.
+// what is the programme summary ("Full day 8:30am - 4:00pm + lunch") and when is
+// the dates, so the message stands on its own.
+func SendCampConfirmationSMS(cfg *config.Config, phone, child, what, when string, totalKES int) error {
+	return sendSMS(cfg, phone, campConfirmationMessage(child, what, when, totalKES))
+}
+
+func campConfirmationMessage(child, what, when string, totalKES int) string {
+	return fmt.Sprintf("Confirmed! %s is registered for the K-Arena Holiday Football Camp: %s, %s. Paid %s. Directions: %s",
+		child, what, when, camp.FormatKES(totalKES), directionsLink)
+}
+
+func sendSMS(cfg *config.Config, phone, message string) error {
 	formattedPhone := FormatPhoneE164(phone)
 
 	if formattedPhone == "" {
 		return fmt.Errorf("cannot send SMS: phone number is empty")
 	}
-
-	directionsLink := "https://maps.app.goo.gl/XjfyKBvQyhBifDBCA?g_st=ac"
-	message := fmt.Sprintf("Confirmed! %s, your pitch is booked @ %s Date: %s. Directions: %s", name, timeSlot, date, directionsLink)
 
 	data := url.Values{}
 	data.Set("username", cfg.ATUsername)

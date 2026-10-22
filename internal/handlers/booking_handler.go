@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"turf-booking-backend/internal/camp"
 	"turf-booking-backend/internal/config"
 	"turf-booking-backend/internal/middleware"
 	"turf-booking-backend/internal/models"
@@ -62,7 +63,14 @@ type BookingHandler struct {
 	phoneLimiter *middleware.Limiter
 	upgrader     websocket.Upgrader
 	cache        bookingsCache
+
+	// camp shares this handler's Paystack webhook and payment WebSocket.
+	camp *CampHandler
 }
+
+// AttachCamp lets the webhook and the payment WebSocket serve camp payments
+// as well as pitch bookings.
+func (h *BookingHandler) AttachCamp(c *CampHandler) { h.camp = c }
 
 func NewBookingHandler(collection *mongo.Collection, cfg *config.Config, hub *ws.PaymentHub) *BookingHandler {
 	allowed := make(map[string]struct{}, len(cfg.AllowedOrigins))
@@ -133,9 +141,11 @@ func newReference() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// validReference accepts the current 32-hex references and the 24-hex
-// ObjectID references issued before they were randomised.
+// validReference accepts the current 32-hex references, the 24-hex ObjectID
+// references issued before they were randomised, and camp references
+// ("camp-" plus 32 hex).
 func validReference(s string) bool {
+	s = strings.TrimPrefix(s, camp.ReferencePrefix)
 	if len(s) != 32 && len(s) != 24 {
 		return false
 	}
@@ -152,8 +162,13 @@ func writeJSON(w http.ResponseWriter, status int, body []byte) {
 // AdminOnly gates a handler behind the shared admin API key. The key is held
 // only by the Next.js server, which checks the admin's session before calling.
 func (h *BookingHandler) AdminOnly(next http.HandlerFunc) http.HandlerFunc {
+	return adminOnly(h.Config, next)
+}
+
+// adminOnly is the bearer-key check shared by every admin endpoint.
+func adminOnly(cfg *config.Config, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		key := h.Config.AdminAPIKey
+		key := cfg.AdminAPIKey
 		if key == "" {
 			http.Error(w, "Admin API is not enabled", http.StatusServiceUnavailable)
 			return
@@ -487,6 +502,8 @@ func (h *BookingHandler) PaystackWebhook(w http.ResponseWriter, r *http.Request)
 		Data  struct {
 			Reference string `json:"reference"`
 			Status    string `json:"status"`
+			Amount    int64  `json:"amount"`
+			Currency  string `json:"currency"`
 		} `json:"data"`
 	}
 
@@ -496,6 +513,24 @@ func (h *BookingHandler) PaystackWebhook(w http.ResponseWriter, r *http.Request)
 	}
 
 	reference := event.Data.Reference
+
+	// Camp registrations share this webhook and are told apart by their prefix.
+	if camp.IsReference(reference) {
+		if h.camp == nil {
+			log.Printf("Webhook for camp reference %s ignored: camp handler not attached\n", reference)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		h.camp.HandlePaystackEvent(w, r, paystackEvent{
+			Event:       event.Event,
+			Reference:   reference,
+			Status:      event.Data.Status,
+			Currency:    event.Data.Currency,
+			AmountCents: event.Data.Amount,
+		})
+		return
+	}
+
 	if event.Event == "charge.success" {
 
 		filter := bson.M{
@@ -559,9 +594,19 @@ func (h *BookingHandler) paymentStatus(reference string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
+	if camp.IsReference(reference) {
+		if h.camp == nil {
+			return "", errUnknownReference
+		}
+		return h.camp.PaymentStatus(ctx, reference)
+	}
+
 	var b models.Booking
 	err := h.Collection.FindOne(ctx, bson.M{"transaction.reference": reference},
 		options.FindOne().SetProjection(bson.M{"transaction.paymentStatus": 1})).Decode(&b)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return "", errUnknownReference
+	}
 	if err != nil {
 		return "", err
 	}
@@ -577,7 +622,7 @@ func (h *BookingHandler) WSStatusHandler(w http.ResponseWriter, r *http.Request)
 
 	// Only a real, known payment may hold a socket open.
 	if _, err := h.paymentStatus(reference); err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
+		if errors.Is(err, errUnknownReference) {
 			http.Error(w, "Unknown reference", http.StatusNotFound)
 		} else {
 			log.Printf("[DB_ERROR] ws lookup: %v", err)

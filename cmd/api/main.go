@@ -15,6 +15,7 @@ import (
 	"turf-booking-backend/internal/db"
 	"turf-booking-backend/internal/handlers"
 	"turf-booking-backend/internal/middleware"
+	"turf-booking-backend/internal/schedule"
 	"turf-booking-backend/internal/services"
 	"turf-booking-backend/internal/ws"
 )
@@ -25,8 +26,10 @@ func main() {
 		log.Fatalf("Refusing to start: %v", err)
 	}
 	if cfg.AdminAPIKey == "" {
-		log.Println("ADMIN_API_KEY is not set: the admin endpoints (bookings and camp registrations) are disabled")
+		log.Println("ADMIN_API_KEY is not set: the admin endpoints (bookings, members and camp registrations) are disabled")
 	}
+
+	configureHolidays(cfg)
 
 	port := cfg.Port
 	if port == "" {
@@ -48,6 +51,11 @@ func main() {
 
 	bookingHandler := handlers.NewBookingHandler(collection, cfg, hub)
 
+	// Members get the member price on the sessions it covers (see schedule.MemberEligible).
+	memberCollection := mongoClient.Database("arena").Collection("members")
+	db.EnsureMemberIndexes(memberCollection)
+	bookingHandler.AttachMembers(handlers.NewMongoMemberStore(memberCollection))
+
 	campCollection := mongoClient.Database("arena").Collection("camp_registrations")
 	db.EnsureCampIndexes(campCollection)
 	services.StartCampCleanupWorker(campCollection)
@@ -64,10 +72,19 @@ func main() {
 	wsLimit := middleware.NewLimiter(30, 10)
 	adminLimit := middleware.NewLimiter(30, 10)
 	campLimit := middleware.NewLimiter(20, 10)
+	// A price check is made when a customer has typed their number, so a few a
+	// minute is plenty; the low limit also makes it useless for finding out
+	// which numbers are members.
+	quoteLimit := middleware.NewLimiter(20, 10)
 
 	mux := http.NewServeMux()
+	mux.Handle("GET /api/v1/schedule", readLimit.ByIP(hops, http.HandlerFunc(handlers.NewScheduleHandler().Get)))
 	mux.Handle("GET /api/v1/bookings", readLimit.ByIP(hops, http.HandlerFunc(bookingHandler.GetBookings)))
 	mux.Handle("GET /api/v1/admin/bookings", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.GetBookingsAdmin)))
+	mux.Handle("GET /api/v1/admin/members", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.ListMembers)))
+	mux.Handle("POST /api/v1/admin/members", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.AddMember)))
+	mux.Handle("DELETE /api/v1/admin/members/{phone}", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.RemoveMember)))
+	mux.Handle("POST /api/v1/quote", quoteLimit.ByIP(hops, http.HandlerFunc(bookingHandler.Quote)))
 	mux.Handle("POST /api/v1/initiate/paystack/push-stk", bookLimit.ByIP(hops, http.HandlerFunc(bookingHandler.InitiateBooking)))
 	mux.Handle("POST /api/v1/camp/register", campLimit.ByIP(hops, http.HandlerFunc(campHandler.Register)))
 	mux.Handle("GET /api/v1/admin/camp/registrations", adminLimit.ByIP(hops, campHandler.AdminOnly(campHandler.ListAdmin)))
@@ -110,4 +127,29 @@ func main() {
 	// ListenAndServe returns as soon as Shutdown begins; wait for requests in
 	// flight (e.g. a payment webhook) to finish before the process exits.
 	<-drained
+}
+
+// configureHolidays adds the holidays set with EXTRA_HOLIDAYS to the built-in
+// Kenyan calendar, and says in the log what the calendar will do, so a mistake
+// in the setting shows up when the server starts rather than on a holiday.
+func configureHolidays(cfg *config.Config) {
+	extra, problems := schedule.ParseHolidays(cfg.ExtraHolidays)
+	for _, p := range problems {
+		log.Printf("[CONFIG] EXTRA_HOLIDAYS entry ignored, %s", p)
+	}
+	schedule.SetExtraHolidays(extra)
+
+	now := time.Now()
+	upcoming := schedule.HolidaysBetween(now, now.AddDate(0, 0, 120))
+	if len(upcoming) == 0 {
+		log.Println("[SCHEDULE] no public holidays in the next 120 days")
+	}
+	for _, h := range upcoming {
+		log.Printf("[SCHEDULE] public holiday (weekend hours): %s %s", h.Date, h.Name)
+	}
+	// Eid-ul-Fitr and Eid-ul-Adha are announced a day or two before, so they are
+	// the one part of the calendar that needs a person's attention each year.
+	if last := schedule.LastDeclared(); last == "" || last < now.AddDate(0, 0, 90).Format("2006-01-02") {
+		log.Printf("[SCHEDULE] Eid-ul-Fitr and Eid-ul-Adha are only known up to %q: when the Interior Cabinet Secretary gazettes the next ones, add them to EXTRA_HOLIDAYS (e.g. EXTRA_HOLIDAYS=2027-03-09=Eid-ul-Fitr)", last)
+	}
 }

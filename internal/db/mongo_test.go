@@ -33,3 +33,15 @@ func TestCampIndexes(t *testing.T) {
 		t.Errorf("status_created index = %v", list)
 	}
 }
+
+func TestMemberIndexes(t *testing.T) {
+	models := memberIndexModels()
+	if len(models) != 1 {
+		t.Fatalf("got %d member indexes", len(models))
+	}
+	keys, _ := models[0].Keys.(bson.D)
+	// Two members with one number would split their sessions between two records.
+	if len(keys) != 1 || keys[0].Key != "phoneNumber" || models[0].Options.Unique == nil || !*models[0].Options.Unique {
+		t.Errorf("a member's number must be uniquely indexed, got %v", models[0])
+	}
+}

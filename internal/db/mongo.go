@@ -49,9 +49,38 @@ func EnsureIndexes(collection *mongo.Collection) {
 			},
 			Options: options.Index().SetName("date_status"),
 		},
+		{
+			// Counting a member's discounted sessions in a month.
+			Keys: bson.D{
+				{Key: "team.phoneNumber", Value: 1},
+				{Key: "bookingDetails.date", Value: 1},
+			},
+			Options: options.Index().SetName("phone_date"),
+		},
 	})
 	if err != nil {
 		log.Printf("[DB] could not ensure indexes: %v", err)
+	}
+}
+
+// EnsureMemberIndexes keeps each member's number unique. As with the other
+// indexes, a failure is logged rather than fatal.
+func EnsureMemberIndexes(collection *mongo.Collection) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := collection.Indexes().CreateMany(ctx, memberIndexModels())
+	if err != nil {
+		log.Printf("[DB] could not ensure member indexes: %v", err)
+	}
+}
+
+func memberIndexModels() []mongo.IndexModel {
+	return []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "phoneNumber", Value: 1}},
+			Options: options.Index().SetUnique(true).SetName("uniq_member_phone"),
+		},
 	}
 }
 

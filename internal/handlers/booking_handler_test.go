@@ -29,8 +29,9 @@ func validBody(overrides map[string]string) string {
 		"email":       "wanjiru@example.com",
 		"phoneNumber": "254712345678",
 		"date":        schedule.Today(time.Now().AddDate(0, 0, 2)),
-		"timeRange":   "20:00 – 22:00",
-		"pitchType":   "5Aside",
+		// On the grid on every kind of day: weekday, weekend and public holiday.
+		"timeRange": "21:00 – 23:00",
+		"pitchType": "5Aside",
 	}
 	for k, v := range overrides {
 		fields[k] = v
@@ -232,15 +233,19 @@ func TestToOccupancyFailsClosed(t *testing.T) {
 	got := toOccupancy([]models.Booking{
 		b("5Aside", "18:00 – 19:00"),
 		b("8Aside", "18:00 – 20:00"),
-		b("???", "20:00 – 21:00"), // unknown pitch: assume the whole pitch
-		b("5Aside", "garbage"),    // unreadable time: assume the whole day
+		b("???", "20:00 – 21:00"),    // unknown pitch: assume the whole pitch
+		b("5Aside", "garbage"),       // unreadable time: assume the whole day
+		b("8Aside", "23:00 – 01:00"), // runs into the next morning
+		b("5Aside", "00:00 – 01:00"), // the last hour of the operating day
 	}, "2026-10-14")
 
 	want := []schedule.Occupancy{
 		{Start: 18 * 60, End: 19 * 60, Units: 1},
 		{Start: 18 * 60, End: 20 * 60, Units: 2},
 		{Start: 20 * 60, End: 21 * 60, Units: 2},
-		{Start: 0, End: 24 * 60, Units: 1},
+		{Start: 0, End: schedule.DayEnd, Units: 1},
+		{Start: 23 * 60, End: 25 * 60, Units: 2},
+		{Start: 24 * 60, End: 25 * 60, Units: 1},
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -249,6 +254,14 @@ func TestToOccupancyFailsClosed(t *testing.T) {
 	}
 	if schedule.Fits(toOccupancy([]models.Booking{b("5Aside", "garbage")}, "d"), 20*60, 22*60, 2) {
 		t.Error("an unreadable row must block an 8-aside on that date")
+	}
+	if schedule.Fits(toOccupancy([]models.Booking{b("5Aside", "garbage")}, "d"), 24*60, 25*60, 2) {
+		t.Error("an unreadable row must block the late-night hour too")
+	}
+	// A late booking blocks the sessions around midnight, on its own date.
+	late := toOccupancy([]models.Booking{b("8Aside", "23:00 – 01:00")}, "2026-10-16")
+	if schedule.Fits(late, 24*60, 25*60, 1) || schedule.Fits(late, 23*60, 24*60, 1) || !schedule.Fits(late, 21*60, 23*60, 2) {
+		t.Error("a 23:00 - 01:00 8-aside booking must block 23:00-00:00 and 00:00-01:00 and nothing earlier")
 	}
 }
 

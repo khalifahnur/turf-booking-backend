@@ -7,17 +7,22 @@ import (
 )
 
 // The member discount. A member is a customer on the list the admin keeps (see
-// the handlers package); this file is only the rule, so what it covers and what
-// it costs live in one place beside the standard prices.
+// the handlers package). In each calendar month a member pays the standard price
+// for their first three 8-a-side 2 hour sessions and gets 80% off the fourth:
+// Ksh 10,000, Ksh 10,000, Ksh 10,000 and then Ksh 2,000. This file is only the
+// rule, so what it covers and what it costs live in one place beside the
+// standard prices.
 const (
-	// MemberDiscountPercent is taken off the price of a session a member is
-	// eligible for.
-	MemberDiscountPercent = 20
+	// MemberDiscountPercent is taken off the price of the session the discount
+	// is given on.
+	MemberDiscountPercent = 80
 
-	// MemberSessionsPerMonth is how many sessions a member gets that price on in
-	// a calendar month. A session counts towards the month its date is in, which
-	// is the operating day it starts on (see the package comment).
-	MemberSessionsPerMonth = 4
+	// MemberDiscountSession is the session of the month the discount is given on:
+	// the fourth, after three at the standard price. Only 8-a-side 2 hour
+	// sessions that have been paid for count towards it, and a session counts
+	// towards the month its date is in, which is the operating day it starts on
+	// (see the package comment).
+	MemberDiscountSession = 4
 )
 
 // MemberEligible reports whether the member discount can apply to a session:
@@ -26,8 +31,9 @@ func MemberEligible(pitchType string, minutes int) bool {
 	return pitchType == Pitch8Aside && minutes == 120
 }
 
-// MemberPriceKES is the price in whole shillings a member pays for an eligible
-// session, and false for a session the discount does not cover.
+// MemberPriceKES is the price in whole shillings a member pays for the session
+// the discount is given on, and false for a session the discount does not
+// cover.
 func MemberPriceKES(pitchType string, minutes int) (int, bool) {
 	if !MemberEligible(pitchType, minutes) {
 		return 0, false

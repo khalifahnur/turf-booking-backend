@@ -44,14 +44,17 @@ type memberJSON struct {
 	FullName    string    `json:"fullName"`
 	PhoneNumber string    `json:"phoneNumber"`
 	CreatedAt   time.Time `json:"createdAt"`
-	Used        int       `json:"used"`
+	// Sessions are the 8-a-side 2 hour sessions paid for this month; DiscountUsed
+	// says whether the month's discount has been given.
+	Sessions     int  `json:"sessions"`
+	DiscountUsed bool `json:"discountUsed"`
 }
 
 type memberListJSON struct {
-	Month   string       `json:"month"`
-	Percent int          `json:"percent"`
-	Limit   int          `json:"limit"`
-	Members []memberJSON `json:"members"`
+	Month           string       `json:"month"`
+	Percent         int          `json:"percent"`
+	DiscountSession int          `json:"discountSession"`
+	Members         []memberJSON `json:"members"`
 }
 
 func (f *flow) list(t *testing.T) memberListJSON {
@@ -104,7 +107,7 @@ func TestMemberAdminEndpointsNeedTheAdminKey(t *testing.T) {
 	}
 }
 
-func TestTheMemberListShowsEachMembersSessionsThisMonth(t *testing.T) {
+func TestTheMemberListShowsWhereEachMemberStandsThisMonth(t *testing.T) {
 	f := newFlow()
 	for _, m := range []struct{ name, phone string }{
 		// Not in the order of their numbers, so a list sorted by number would be caught.
@@ -114,21 +117,28 @@ func TestTheMemberListShowsEachMembersSessionsThisMonth(t *testing.T) {
 			t.Fatalf("add %s = %d %s", m.name, rec.Code, rec.Body.String())
 		}
 	}
-	f.book(t, body{"phoneNumber": memberPhone, "date": nov(3)})
-	f.book(t, body{"phoneNumber": memberPhone, "date": nov(4)})
-	f.book(t, body{"phoneNumber": "254700111222", "date": nov(5)})
-	f.book(t, body{"phoneNumber": memberPhone, "date": "2026-12-01"}) // next month: not this month's
-	f.book(t, body{"phoneNumber": plainPhone, "date": nov(6)})        // not a member
+	f.bookPaid(t, body{"phoneNumber": memberPhone, "date": nov(3)})
+	f.bookPaid(t, body{"phoneNumber": memberPhone, "date": nov(4)})
+	f.book(t, body{"phoneNumber": memberPhone, "date": nov(5)}) // not paid yet: does not count
+	f.bookPaid(t, body{"phoneNumber": "254700111222", "date": nov(6)})
+	f.bookPaid(t, body{"phoneNumber": memberPhone, "date": "2026-12-01"}) // next month: not this month's
+	f.bookPaid(t, body{"phoneNumber": plainPhone, "date": nov(7)})        // not a member: not in the list
+	f.bookPaid(t, body{"phoneNumber": "254733000222", "date": nov(8)})    // amina: three paid, then the discounted fourth
+	f.bookPaid(t, body{"phoneNumber": "254733000222", "date": nov(9)})
+	f.bookPaid(t, body{"phoneNumber": "254733000222", "date": nov(10)})
+	if resp := f.book(t, body{"phoneNumber": "254733000222", "date": nov(11)}); resp.Amount != 2_000 {
+		t.Fatalf("setup: amina's fourth cost %d", resp.Amount)
+	}
 
 	got := f.list(t)
-	if got.Month != "2026-11" || got.Percent != 20 || got.Limit != 4 {
-		t.Errorf("rule = %q %d%% %d", got.Month, got.Percent, got.Limit)
+	if got.Month != "2026-11" || got.Percent != 80 || got.DiscountSession != 4 {
+		t.Errorf("rule = %q %d%% session %d", got.Month, got.Percent, got.DiscountSession)
 	}
 	var names []string
-	used := map[string]int{}
+	byPhone := map[string]memberJSON{}
 	for _, m := range got.Members {
 		names = append(names, m.FullName)
-		used[m.PhoneNumber] = m.Used
+		byPhone[m.PhoneNumber] = m
 		if m.ID == "" || m.CreatedAt.IsZero() {
 			t.Errorf("member %+v is missing its id or creation time", m)
 		}
@@ -136,8 +146,16 @@ func TestTheMemberListShowsEachMembersSessionsThisMonth(t *testing.T) {
 	if want := []string{"amina Otieno", "Brian Kamau", "zainab Hassan"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("order = %v, want by name without regard to case: %v", names, want)
 	}
-	if used[memberPhone] != 2 || used["254700111222"] != 1 || used["254733000222"] != 0 {
-		t.Errorf("sessions used this month = %v, want 2, 1 and 0", used)
+	// The discounted fourth is still waiting for its payment, so amina has paid
+	// for three; the discount has been given.
+	if m := byPhone[memberPhone]; m.Sessions != 2 || m.DiscountUsed {
+		t.Errorf("Brian = %+v, want 2 paid sessions and no discount yet", m)
+	}
+	if m := byPhone["254700111222"]; m.Sessions != 1 || m.DiscountUsed {
+		t.Errorf("zainab = %+v, want 1 paid session", m)
+	}
+	if m := byPhone["254733000222"]; m.Sessions != 3 || !m.DiscountUsed {
+		t.Errorf("amina = %+v, want 3 paid sessions and the discount given", m)
 	}
 }
 
@@ -145,24 +163,25 @@ func TestTheMemberListShowsEachMembersSessionsThisMonth(t *testing.T) {
 // on 1 December the venue is still running 30 November's evening.
 func TestTheMemberListMonthFollowsTheOperatingDay(t *testing.T) {
 	f := newFlow(memberPhone)
-	f.book(t, body{"date": nov(30)})
-	f.book(t, body{"date": "2026-12-01"})
+	f.bookPaid(t, body{"date": nov(30)})
+	f.bookPaid(t, body{"date": "2026-12-01"})
+	f.bookPaid(t, body{"date": "2026-12-02"})
 
 	for _, c := range []struct {
-		now       time.Time
-		wantMonth string
-		wantUsed  int
+		now          time.Time
+		wantMonth    string
+		wantSessions int
 	}{
 		{time.Date(2026, 11, 20, 12, 0, 0, 0, schedule.Location()), "2026-11", 1},
 		{time.Date(2026, 12, 1, 0, 30, 0, 0, schedule.Location()), "2026-11", 1},
-		{time.Date(2026, 12, 1, 1, 0, 0, 0, schedule.Location()), "2026-12", 1},
-		{time.Date(2026, 12, 20, 12, 0, 0, 0, schedule.Location()), "2026-12", 1},
+		{time.Date(2026, 12, 1, 1, 0, 0, 0, schedule.Location()), "2026-12", 2},
+		{time.Date(2026, 12, 20, 12, 0, 0, 0, schedule.Location()), "2026-12", 2},
 		{time.Date(2027, 1, 5, 12, 0, 0, 0, schedule.Location()), "2027-01", 0},
 	} {
 		f.h.now = func() time.Time { return c.now }
 		got := f.list(t)
-		if got.Month != c.wantMonth || len(got.Members) != 1 || got.Members[0].Used != c.wantUsed {
-			t.Errorf("at %s: month %q used %v, want %q and %d", c.now.Format(time.RFC3339), got.Month, got.Members, c.wantMonth, c.wantUsed)
+		if got.Month != c.wantMonth || len(got.Members) != 1 || got.Members[0].Sessions != c.wantSessions {
+			t.Errorf("at %s: month %q members %v, want %q with %d paid sessions", c.now.Format(time.RFC3339), got.Month, got.Members, c.wantMonth, c.wantSessions)
 		}
 	}
 }
@@ -177,7 +196,7 @@ func TestAddingAMember(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
 		t.Fatal(err)
 	}
-	if m.FullName != "Amina Otieno" || m.PhoneNumber != "254712345678" || m.ID == "" || m.Used != 0 {
+	if m.FullName != "Amina Otieno" || m.PhoneNumber != "254712345678" || m.ID == "" || m.Sessions != 0 || m.DiscountUsed {
 		t.Errorf("added member = %+v, want a tidied name and the number as 254712345678", m)
 	}
 	if !m.CreatedAt.Equal(flowNow) {
@@ -198,10 +217,39 @@ func TestAddingAMember(t *testing.T) {
 		t.Errorf("members = %+v", got.Members)
 	}
 
-	// And they get the member price straight away, whichever way they type their number.
+	// Whichever way they type their number it is the same member: once the
+	// sessions already paid for this month reach three, the next one is discounted.
 	f.h.phoneLimiter = middleware.NewLimiter(6_000_000, 1_000_000)
-	if resp := f.book(t, body{"phoneNumber": "+254 712 345 678"}); resp.Amount != 8_000 {
-		t.Errorf("the new member's first booking cost %d", resp.Amount)
+	for i, typed := range []string{"+254 712 345 678", "0712345678", "712345678"} {
+		if resp := f.bookPaid(t, body{"phoneNumber": typed, "date": nov(3 + i)}); resp.Amount != 10_000 {
+			t.Errorf("session %d cost %d", i+1, resp.Amount)
+		}
+	}
+	if resp := f.book(t, body{"phoneNumber": "254712345678", "date": nov(6)}); resp.Amount != 2_000 {
+		t.Errorf("the new member's fourth session cost %d, want Ksh 2,000", resp.Amount)
+	}
+}
+
+// A number that has already paid for sessions this month starts the list where
+// those sessions put it: they count whether or not it was a member when it booked.
+func TestAddingAMemberShowsTheSessionsAlreadyPaidForThisMonth(t *testing.T) {
+	f := newFlow()
+	for i := 0; i < 3; i++ {
+		f.seedPaid(memberPhone, nov(10+i), "21:00 – 23:00", "8Aside")
+	}
+	f.seedPaid(memberPhone, "2026-12-01", "21:00 – 23:00", "8Aside") // next month: not counted
+	f.seedPaid(memberPhone, nov(13), "21:00 – 22:00", "8Aside")      // 1 hour: not counted
+
+	rec := f.admin(http.MethodPost, "/api/v1/admin/members", body{"fullName": "Amina Otieno", "phoneNumber": memberPhone})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("add = %d %s", rec.Code, rec.Body.String())
+	}
+	var m memberJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Sessions != 3 || m.DiscountUsed {
+		t.Errorf("added member = %+v, want 3 paid sessions and no discount given yet", m)
 	}
 }
 
@@ -261,8 +309,11 @@ func TestRemovingAMember(t *testing.T) {
 	if len(got.Members) != 1 || got.Members[0].PhoneNumber != member2Phone {
 		t.Errorf("members = %+v, want only the second member left", got.Members)
 	}
+	for i := 0; i < 3; i++ {
+		f.seedPaid(memberPhone, nov(20+i), "21:00 – 23:00", "8Aside")
+	}
 	if resp := f.book(t, body{"phoneNumber": memberPhone}); resp.Amount != 10_000 {
-		t.Errorf("the removed member's next booking cost %d, want the full price", resp.Amount)
+		t.Errorf("the removed member's fourth session cost %d, want the standard price", resp.Amount)
 	}
 }
 
@@ -283,7 +334,7 @@ func TestMemberAdminFailsCleanlyWhenTheDatabaseDoes(t *testing.T) {
 	}
 
 	f.members.failures = nil
-	f.bookings.failures = map[string]error{"MemberSessionsByPhone": errors.New("down")}
+	f.bookings.failures = map[string]error{"MemberMonth": errors.New("down")}
 	if rec := f.admin(http.MethodGet, "/api/v1/admin/members", nil); rec.Code != http.StatusInternalServerError {
 		t.Errorf("a failing count = %d, want 500", rec.Code)
 	}
@@ -314,35 +365,15 @@ func bookingFieldPaths() map[string]bool {
 func TestBookingQueriesUseRealFieldNames(t *testing.T) {
 	paths := bookingFieldPaths()
 	from, to := "2026-11-01", "2026-12-01"
-	var pipelineStages []bson.M
-	for _, stage := range memberSessionsByPhonePipeline(from, to) {
-		raw, err := bson.Marshal(stage)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var m bson.M
-		if err := bson.Unmarshal(raw, &m); err != nil {
-			t.Fatal(err)
-		}
-		pipelineStages = append(pipelineStages, m)
+	projection := map[string]any{}
+	for k, v := range memberMonthFields {
+		projection[k] = v
 	}
-	match, ok := pipelineStages[0]["$match"].(bson.M)
-	if !ok {
-		t.Fatalf("the first stage must be a $match: %v", pipelineStages[0])
-	}
-	group, ok := pipelineStages[1]["$group"].(bson.M)
-	if !ok || group["_id"] != "$team.phoneNumber" {
-		t.Fatalf("the second stage must group by the phone number: %v", pipelineStages[1])
-	}
-	if !paths["team.phoneNumber"] {
-		t.Error("team.phoneNumber is not a bson field of Booking")
-	}
-
 	queries := map[string]any{
 		"occupancyFilter":                occupancyFilter("2026-11-03"),
-		"memberSessionsFilter":           memberSessionsFilter(memberPhone, from, to),
-		"memberSessionsFilter(everyone)": memberSessionsFilter("", from, to),
-		"pipeline $match":                match,
+		"memberMonthFilter":              memberMonthFilter(memberPhone, from, to),
+		"memberMonthFilter(everyone)":    memberMonthFilter("", from, to),
+		"memberMonthFields (projection)": bson.M(projection),
 		"failBookingFilter":              failBookingFilter("abc"),
 		"failBookingUpdate":              failBookingUpdate(),
 	}
@@ -389,30 +420,29 @@ func TestMemberQueriesUseRealFieldNames(t *testing.T) {
 	}
 }
 
-// What counts towards the month, checked against the filter itself: member
-// price only, this number only, a date in the month, a status that holds a place.
-func TestMemberSessionsFilterMatchesExactlyTheSessionsThatCount(t *testing.T) {
+// Which bookings the month's filter picks up, checked against the filter itself:
+// 8-a-side only, a date in the month, a status that holds a place, and the number.
+func TestMemberMonthFilterMatchesExactlyTheBookingsThatCanCount(t *testing.T) {
 	booking := func(mut func(*models.Booking)) models.Booking {
 		b := models.Booking{
 			Team:           models.Team{PhoneNumber: memberPhone},
-			BookingDetails: models.BookingDetails{Date: "2026-11-15", BookingStatus: "Pending"},
-			Transaction:    models.Transaction{Discount: models.DiscountMember},
+			BookingDetails: models.BookingDetails{Date: "2026-11-15", PitchType: "8Aside", Time: "21:00 – 23:00", BookingStatus: "Booked"},
 		}
 		if mut != nil {
 			mut(&b)
 		}
 		return b
 	}
-	filter := memberSessionsFilter(memberPhone, "2026-11-01", "2026-12-01")
+	filter := memberMonthFilter(memberPhone, "2026-11-01", "2026-12-01")
 	for name, c := range map[string]struct {
 		b    models.Booking
 		want bool
 	}{
-		"a pending member session":    {booking(nil), true},
-		"a paid member session":       {booking(func(b *models.Booking) { b.BookingDetails.BookingStatus = "Booked" }), true},
+		"a paid 8-a-side session":     {booking(nil), true},
+		"a pending 8-a-side session":  {booking(func(b *models.Booking) { b.BookingDetails.BookingStatus = "Pending" }), true},
 		"an older confirmed row":      {booking(func(b *models.Booking) { b.BookingDetails.BookingStatus = "Confirmed" }), true},
 		"a failed payment":            {booking(func(b *models.Booking) { b.BookingDetails.BookingStatus = "Failed" }), false},
-		"a full-price booking":        {booking(func(b *models.Booking) { b.Transaction.Discount = "" }), false},
+		"a 5-a-side session":          {booking(func(b *models.Booking) { b.BookingDetails.PitchType = "5Aside" }), false},
 		"another number":              {booking(func(b *models.Booking) { b.Team.PhoneNumber = member2Phone }), false},
 		"the first day of the month":  {booking(func(b *models.Booking) { b.BookingDetails.Date = "2026-11-01" }), true},
 		"the last day of the month":   {booking(func(b *models.Booking) { b.BookingDetails.Date = "2026-11-30" }), true},
@@ -425,7 +455,46 @@ func TestMemberSessionsFilterMatchesExactlyTheSessionsThatCount(t *testing.T) {
 		}
 	}
 	// Without a number it matches every member's sessions.
-	if !matches(docOf(booking(func(b *models.Booking) { b.Team.PhoneNumber = member2Phone })), memberSessionsFilter("", "2026-11-01", "2026-12-01")) {
+	if !matches(docOf(booking(func(b *models.Booking) { b.Team.PhoneNumber = member2Phone })), memberMonthFilter("", "2026-11-01", "2026-12-01")) {
 		t.Error("the filter for everyone must match any number")
+	}
+}
+
+// What the bookings the filter picked up add up to: only 2 hour sessions count,
+// only paid ones are progress, and a discounted one marks the discount as given
+// whether it is paid or still waiting.
+func TestSummariseMemberMonths(t *testing.T) {
+	row := func(phone, timeRange, pitch, status, discount string) models.Booking {
+		return models.Booking{
+			Team:           models.Team{PhoneNumber: phone},
+			BookingDetails: models.BookingDetails{Time: timeRange, PitchType: pitch, BookingStatus: status},
+			Transaction:    models.Transaction{Discount: discount},
+		}
+	}
+	got := summariseMemberMonths([]models.Booking{
+		row(memberPhone, "21:00 – 23:00", "8Aside", "Booked", ""),
+		row(memberPhone, "19:00 – 21:00", "8Aside", "Confirmed", ""),
+		row(memberPhone, "17:00 – 19:00", "8Aside", "Pending", ""),        // waiting: not progress
+		row(memberPhone, "15:00 – 16:00", "8Aside", "Booked", ""),         // 1 hour: not eligible
+		row(memberPhone, "21:00 – 23:00", "5Aside", "Booked", ""),         // 5-a-side: not eligible
+		row(memberPhone, "garbage", "8Aside", "Booked", ""),               // unreadable: not counted
+		row(memberPhone, "23:00 – 01:00", "8Aside", "Booked", ""),         // runs past midnight: still 2 hours
+		row(member2Phone, "21:00 – 23:00", "8Aside", "Pending", "member"), // the discounted one, unpaid
+		row(plainPhone, "21:00 – 23:00", "8Aside", "Booked", ""),
+	})
+	if m := got[memberPhone]; m.Paid != 3 || m.DiscountHeld {
+		t.Errorf("member = %+v, want 3 paid (a paid, a confirmed and one past midnight) and no discount", m)
+	}
+	if m := got[member2Phone]; m.Paid != 0 || !m.DiscountHeld {
+		t.Errorf("member 2 = %+v, want the discount held while its booking waits for payment", m)
+	}
+	if m := got[plainPhone]; m.Paid != 1 || m.DiscountHeld {
+		t.Errorf("plain = %+v", m)
+	}
+	if _, ok := got["254799999999"]; ok || len(got) != 3 {
+		t.Errorf("numbers with nothing to count must not appear: %v", got)
+	}
+	if got := summariseMemberMonths(nil); len(got) != 0 {
+		t.Errorf("no bookings = %v", got)
 	}
 }

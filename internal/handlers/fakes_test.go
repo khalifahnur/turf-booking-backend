@@ -111,10 +111,10 @@ func matches(doc, filter bson.M) bool {
 type fakeBookings struct {
 	mu   sync.Mutex
 	rows []models.Booking
-	// widen makes the member count take a moment, so two requests that are not
-	// serialised have time to both read the same count.
+	// widen makes looking up a member's standing take a moment, so two requests
+	// that are not serialised have time to both read the same standing.
 	widen time.Duration
-	// failures makes a method fail: "Occupancy", "Insert", "MemberSessions", ...
+	// failures makes a method fail: "Occupancy", "Insert", "MemberMonth", ...
 	failures map[string]error
 }
 
@@ -169,55 +169,41 @@ func (f *fakeBookings) MarkFailed(_ context.Context, reference string) error {
 	return nil
 }
 
-func (f *fakeBookings) MemberSessions(_ context.Context, phone, month string) (int, error) {
-	n, err := f.memberSessions(phone, month)
-	// The count is out of date as soon as it is read. Pausing here, after the
+func (f *fakeBookings) MemberMonth(_ context.Context, phone, month string) (MemberMonth, error) {
+	months, err := f.memberMonths(phone, month)
+	// The standing is out of date as soon as it is read. Pausing here, after the
 	// read, gives every request that is not serialised time to read the same
-	// count, however many CPUs the test runs on.
+	// standing, however many CPUs the test runs on.
 	if f.widen > 0 {
 		time.Sleep(f.widen)
 	}
-	return n, err
+	return months[phone], err
 }
 
-func (f *fakeBookings) memberSessions(phone, month string) (int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.fail("MemberSessions"); err != nil {
-		return 0, err
-	}
-	from, to, err := schedule.MonthBounds(month)
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	filter := memberSessionsFilter(phone, from, to)
-	for _, b := range f.rows {
-		if matches(docOf(b), filter) {
-			n++
-		}
-	}
-	return n, nil
+func (f *fakeBookings) MemberMonths(_ context.Context, month string) (map[string]MemberMonth, error) {
+	return f.memberMonths("", month)
 }
 
-func (f *fakeBookings) MemberSessionsByPhone(_ context.Context, month string) (map[string]int, error) {
+// memberMonths runs the filter the MongoDB store sends over the bookings, and
+// summarises what it matches with the same function the store uses.
+func (f *fakeBookings) memberMonths(phone, month string) (map[string]MemberMonth, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.fail("MemberSessionsByPhone"); err != nil {
+	if err := f.fail("MemberMonth"); err != nil {
 		return nil, err
 	}
 	from, to, err := schedule.MonthBounds(month)
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]int{}
-	filter := memberSessionsFilter("", from, to)
+	var hit []models.Booking
+	filter := memberMonthFilter(phone, from, to)
 	for _, b := range f.rows {
 		if matches(docOf(b), filter) {
-			out[b.Team.PhoneNumber]++
+			hit = append(hit, b)
 		}
 	}
-	return out, nil
+	return summariseMemberMonths(hit), nil
 }
 
 // ---- in-memory members ------------------------------------------------------

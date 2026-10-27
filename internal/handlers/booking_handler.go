@@ -360,8 +360,8 @@ func readJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
-// memberLockKey is the lock that makes counting a member's discounted sessions
-// and booking one more a single step for that number.
+// memberLockKey is the lock that makes working out where a member stands with
+// the discount and booking one more session a single step for that number.
 func memberLockKey(phone string) string { return "member:" + phone }
 
 func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request) {
@@ -373,8 +373,8 @@ func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request)
 		Time        string `json:"timeRange"`
 		PitchType   string `json:"pitchType"`
 		// ExpectedAmount is the price the customer was shown. If it is sent and
-		// the price is no longer that (a member's discounted sessions for the
-		// month ran out in another tab, say) the booking is refused, so nobody is
+		// the price is no longer that (the month's discount was given to another
+		// booking in another tab, say) the booking is refused, so nobody is
 		// charged an amount they have not seen.
 		ExpectedAmount *int `json:"expectedAmount"`
 	}
@@ -427,9 +427,10 @@ func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// A member's discounted sessions are counted and then one more is booked, so
-	// that has to happen one request at a time for that number: otherwise two
-	// requests sent together would both see "3 of 4 used". This lock is always
+	// Where a member stands with the discount is looked up and then one more
+	// session is booked, so that has to happen one request at a time for that
+	// number: otherwise two requests sent together would both see "three paid, no
+	// discount given yet" and both get the discount. This lock is always
 	// taken before the date lock below, never after, so the two cannot deadlock.
 	b := bookingRequest{
 		userName: userName, email: email, phone: phone, pitchType: req.PitchType,

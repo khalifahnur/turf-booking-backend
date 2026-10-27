@@ -22,12 +22,19 @@ type BookingDetails struct {
 	BookingStatus string    `bson:"bookingStatus" json:"bookingStatus"`
 }
 
+// DiscountMember marks a booking that was charged the member price.
+const DiscountMember = "member"
+
 type Transaction struct {
 	PaymentStatus string `bson:"paymentStatus" json:"paymentStatus"`
 	Reference     string `bson:"reference" json:"reference"`
 	// Amount is the price in whole KES that the server charged for the booking.
-	Amount    int       `bson:"amount,omitempty" json:"amount,omitempty"`
-	Timestamp time.Time `bson:"timestamp" json:"timestamp"`
+	Amount int `bson:"amount,omitempty" json:"amount,omitempty"`
+	// ListAmount is the standard price, recorded only when a discount took
+	// something off it. Discount names that discount (DiscountMember).
+	ListAmount int       `bson:"listAmount,omitempty" json:"listAmount,omitempty"`
+	Discount   string    `bson:"discount,omitempty" json:"discount,omitempty"`
+	Timestamp  time.Time `bson:"timestamp" json:"timestamp"`
 }
 
 type Booking struct {

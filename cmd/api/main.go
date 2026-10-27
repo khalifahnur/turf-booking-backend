@@ -26,7 +26,7 @@ func main() {
 		log.Fatalf("Refusing to start: %v", err)
 	}
 	if cfg.AdminAPIKey == "" {
-		log.Println("ADMIN_API_KEY is not set: the admin endpoints (bookings and camp registrations) are disabled")
+		log.Println("ADMIN_API_KEY is not set: the admin endpoints (bookings, members and camp registrations) are disabled")
 	}
 
 	configureHolidays(cfg)
@@ -51,6 +51,11 @@ func main() {
 
 	bookingHandler := handlers.NewBookingHandler(collection, cfg, hub)
 
+	// Members get the member price on the sessions it covers (see schedule.MemberEligible).
+	memberCollection := mongoClient.Database("arena").Collection("members")
+	db.EnsureMemberIndexes(memberCollection)
+	bookingHandler.AttachMembers(handlers.NewMongoMemberStore(memberCollection))
+
 	campCollection := mongoClient.Database("arena").Collection("camp_registrations")
 	db.EnsureCampIndexes(campCollection)
 	services.StartCampCleanupWorker(campCollection)
@@ -67,11 +72,19 @@ func main() {
 	wsLimit := middleware.NewLimiter(30, 10)
 	adminLimit := middleware.NewLimiter(30, 10)
 	campLimit := middleware.NewLimiter(20, 10)
+	// A price check is made when a customer has typed their number, so a few a
+	// minute is plenty; the low limit also makes it useless for finding out
+	// which numbers are members.
+	quoteLimit := middleware.NewLimiter(20, 10)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/v1/schedule", readLimit.ByIP(hops, http.HandlerFunc(handlers.NewScheduleHandler().Get)))
 	mux.Handle("GET /api/v1/bookings", readLimit.ByIP(hops, http.HandlerFunc(bookingHandler.GetBookings)))
 	mux.Handle("GET /api/v1/admin/bookings", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.GetBookingsAdmin)))
+	mux.Handle("GET /api/v1/admin/members", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.ListMembers)))
+	mux.Handle("POST /api/v1/admin/members", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.AddMember)))
+	mux.Handle("DELETE /api/v1/admin/members/{phone}", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.RemoveMember)))
+	mux.Handle("POST /api/v1/quote", quoteLimit.ByIP(hops, http.HandlerFunc(bookingHandler.Quote)))
 	mux.Handle("POST /api/v1/initiate/paystack/push-stk", bookLimit.ByIP(hops, http.HandlerFunc(bookingHandler.InitiateBooking)))
 	mux.Handle("POST /api/v1/camp/register", campLimit.ByIP(hops, http.HandlerFunc(campHandler.Register)))
 	mux.Handle("GET /api/v1/admin/camp/registrations", adminLimit.ByIP(hops, campHandler.AdminOnly(campHandler.ListAdmin)))

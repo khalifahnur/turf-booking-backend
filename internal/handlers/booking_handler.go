@@ -10,10 +10,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +60,11 @@ type BookingHandler struct {
 	Hub        *ws.PaymentHub
 	Locker     *utils.SlotLocker
 
+	// store is what taking a booking reads and writes; members is the member
+	// list, and leaving it nil switches the member discount off.
+	store   bookingStore
+	members MemberStore
+
 	// phoneLimiter stops the API being used to spam someone else's handset with
 	// M-Pesa prompts.
 	phoneLimiter *middleware.Limiter
@@ -66,11 +73,19 @@ type BookingHandler struct {
 
 	// camp shares this handler's Paystack webhook and payment WebSocket.
 	camp *CampHandler
+
+	// Replaceable so tests can run the whole booking flow without Paystack or a
+	// real clock.
+	pay func(cfg *config.Config, phone, email string, amountCents int, reference string) (string, error)
+	now func() time.Time
 }
 
 // AttachCamp lets the webhook and the payment WebSocket serve camp payments
 // as well as pitch bookings.
 func (h *BookingHandler) AttachCamp(c *CampHandler) { h.camp = c }
+
+// AttachMembers turns the member discount on, for the numbers on this list.
+func (h *BookingHandler) AttachMembers(m MemberStore) { h.members = m }
 
 func NewBookingHandler(collection *mongo.Collection, cfg *config.Config, hub *ws.PaymentHub) *BookingHandler {
 	allowed := make(map[string]struct{}, len(cfg.AllowedOrigins))
@@ -82,6 +97,9 @@ func NewBookingHandler(collection *mongo.Collection, cfg *config.Config, hub *ws
 		Config:       cfg,
 		Hub:          hub,
 		Locker:       utils.NewSlotLocker(),
+		store:        &mongoBookingStore{c: collection},
+		pay:          services.InitiatePayment,
+		now:          time.Now,
 		phoneLimiter: middleware.NewLimiter(0.3, 3), // 3 attempts, then one every ~3 minutes
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:   1024,
@@ -198,7 +216,7 @@ func (h *BookingHandler) GetBookings(w http.ResponseWriter, r *http.Request) {
 		filter := bson.M{
 			// The operating day is still the previous date until the venue closes
 			// in the small hours, so its late sessions stay on the calendar.
-			"bookingDetails.date": bson.M{"$gte": schedule.OperatingDate(time.Now())},
+			"bookingDetails.date": bson.M{"$gte": schedule.OperatingDate(h.now())},
 			"$or": bson.A{
 				bson.M{"paymentDetails.paymentStatus": "Completed"},
 				bson.M{"bookingDetails.bookingStatus": bson.M{"$in": []string{statusBooked, statusPending}}},
@@ -237,6 +255,29 @@ func (h *BookingHandler) GetBookings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
+// adminBookingView is a booking as the admin dashboard lists it.
+func adminBookingView(b models.Booking) map[string]string {
+	view := map[string]string{
+		"date":        b.BookingDetails.Date,
+		"time":        b.BookingDetails.Time,
+		"status":      b.BookingDetails.BookingStatus,
+		"pitchType":   b.BookingDetails.PitchType,
+		"phoneNumber": b.Team.PhoneNumber,
+		"userName":    b.Team.FullName,
+		"teamName":    b.Team.FullName,
+	}
+	// What was charged, and the discount that made it less than the list price.
+	// Bookings from before prices were recorded have neither.
+	if b.Transaction.Amount > 0 {
+		view["amount"] = strconv.Itoa(b.Transaction.Amount)
+	}
+	if b.Transaction.Discount != "" {
+		view["discount"] = b.Transaction.Discount
+		view["listAmount"] = strconv.Itoa(b.Transaction.ListAmount)
+	}
+	return view
+}
+
 func (h *BookingHandler) GetBookingsAdmin(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
@@ -264,15 +305,7 @@ func (h *BookingHandler) GetBookingsAdmin(w http.ResponseWriter, r *http.Request
 
 	bookedSlots := make([]map[string]string, 0, len(bookings))
 	for _, b := range bookings {
-		bookedSlots = append(bookedSlots, map[string]string{
-			"date":        b.BookingDetails.Date,
-			"time":        b.BookingDetails.Time,
-			"status":      b.BookingDetails.BookingStatus,
-			"pitchType":   b.BookingDetails.PitchType,
-			"phoneNumber": b.Team.PhoneNumber,
-			"userName":    b.Team.FullName,
-			"teamName":    b.Team.FullName,
-		})
+		bookedSlots = append(bookedSlots, adminBookingView(b))
 	}
 
 	body, err := json.Marshal(bookedSlots)
@@ -281,24 +314,6 @@ func (h *BookingHandler) GetBookingsAdmin(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, body)
-}
-
-// occupancy loads what is already on the pitch for a date.
-func (h *BookingHandler) occupancy(ctx context.Context, date string) ([]schedule.Occupancy, error) {
-	cursor, err := h.Collection.Find(ctx, bson.M{
-		"bookingDetails.date":          date,
-		"bookingDetails.bookingStatus": bson.M{"$in": occupyingStatuses},
-	}, options.Find().SetProjection(bson.M{"bookingDetails.time": 1, "bookingDetails.pitchType": 1}))
-	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close(ctx)
-
-	var existing []models.Booking
-	if err := cursor.All(ctx, &existing); err != nil {
-		return nil, err
-	}
-	return toOccupancy(existing, date), nil
 }
 
 // toOccupancy converts stored bookings into pitch usage. Anything it cannot
@@ -321,12 +336,35 @@ func toOccupancy(bookings []models.Booking, date string) []schedule.Occupancy {
 	return out
 }
 
-func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request) {
+// readJSON reads the one JSON object a booking request carries. When it cannot,
+// it says why on w and returns false.
+func readJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
 		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
-		return
+		return false
 	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBookingBody))
+	if err := dec.Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			http.Error(w, "Request too large", http.StatusRequestEntityTooLarge)
+			return false
+		}
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		return false
+	}
+	if dec.More() {
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
 
+// memberLockKey is the lock that makes counting a member's discounted sessions
+// and booking one more a single step for that number.
+func memberLockKey(phone string) string { return "member:" + phone }
+
+func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		UserName    string `json:"userName"`
 		Email       string `json:"email"`
@@ -334,20 +372,13 @@ func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request)
 		Date        string `json:"date"`
 		Time        string `json:"timeRange"`
 		PitchType   string `json:"pitchType"`
+		// ExpectedAmount is the price the customer was shown. If it is sent and
+		// the price is no longer that (a member's discounted sessions for the
+		// month ran out in another tab, say) the booking is refused, so nobody is
+		// charged an amount they have not seen.
+		ExpectedAmount *int `json:"expectedAmount"`
 	}
-
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBookingBody))
-	if err := dec.Decode(&req); err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			http.Error(w, "Request too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
-		return
-	}
-	if dec.More() {
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+	if !readJSON(w, r, &req) {
 		return
 	}
 
@@ -368,7 +399,7 @@ func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request)
 	}
 
 	// The session, its length and therefore its price all come from the server.
-	session, err := schedule.ParseSession(req.Date, req.Time, time.Now())
+	session, err := schedule.ParseSession(req.Date, req.Time, h.now())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -378,12 +409,11 @@ func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Invalid pitch type provided", http.StatusBadRequest)
 		return
 	}
-	priceKES, ok := schedule.PriceKES(req.PitchType, session.Minutes())
+	listKES, ok := schedule.PriceKES(req.PitchType, session.Minutes())
 	if !ok {
 		http.Error(w, "Invalid session length", http.StatusBadRequest)
 		return
 	}
-	amountInCents := priceKES * 100
 
 	if allowed, wait := h.phoneLimiter.Allow(phone); !allowed {
 		middleware.TooManyRequests(w, wait)
@@ -397,85 +427,150 @@ func (h *BookingHandler) InitiateBooking(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// A member's discounted sessions are counted and then one more is booked, so
+	// that has to happen one request at a time for that number: otherwise two
+	// requests sent together would both see "3 of 4 used". This lock is always
+	// taken before the date lock below, never after, so the two cannot deadlock.
+	b := bookingRequest{
+		userName: userName, email: email, phone: phone, pitchType: req.PitchType,
+		session: session, units: units, listKES: listKES, reference: reference,
+		expected: req.ExpectedAmount, releaseMember: func() {},
+	}
+	if h.members != nil && schedule.MemberEligible(req.PitchType, session.Minutes()) {
+		key := memberLockKey(phone)
+		h.Locker.Lock(key)
+		b.releaseMember = sync.OnceFunc(func() { h.Locker.Unlock(key) })
+		defer b.releaseMember()
+	}
+	h.finishBooking(w, r, b)
+}
+
+// bookingRequest is a booking that has passed validation.
+type bookingRequest struct {
+	userName, email, phone string
+	pitchType              string
+	session                schedule.Session
+	units                  int
+	listKES                int
+	reference              string
+	// expected is the price the customer was shown, when they sent one.
+	expected *int
+	// releaseMember lets go of the member's lock, if this booking holds one.
+	releaseMember func()
+}
+
+// finishBooking prices the booking, checks the pitch is free, records it as
+// Pending and sends the M-Pesa prompt. A member's lock, if one is held, is
+// released as soon as the booking is recorded.
+func (h *BookingHandler) finishBooking(w http.ResponseWriter, r *http.Request, b bookingRequest) {
+	priceCtx, cancelPrice := context.WithTimeout(r.Context(), 5*time.Second)
+	price, err := h.priceBooking(priceCtx, b.phone, b.pitchType, b.session, b.listKES)
+	cancelPrice()
+	if err != nil {
+		log.Printf("[DB_ERROR] pricing: %v", err)
+		http.Error(w, "Database read error", http.StatusInternalServerError)
+		return
+	}
+	if b.expected != nil && *b.expected != price.Charge {
+		// Nothing was sent to the customer's phone, so this does not count as an attempt.
+		h.phoneLimiter.Refund(b.phone)
+		middleware.UserError(w, fmt.Sprintf(
+			"The price for this session is now %s, not %s. Please check the total and confirm again.",
+			schedule.FormatKES(price.Charge), schedule.FormatKES(*b.expected)), http.StatusConflict)
+		return
+	}
+
 	// Lock the whole date, not just this time range: a 2 hour booking and the
 	// 1 hour bookings inside it have different labels but compete for the same
 	// pitch, so concurrent requests for a day must be checked one at a time.
-	h.Locker.Lock(session.Date)
-	unlockMutex := sync.OnceFunc(func() { h.Locker.Unlock(session.Date) })
+	h.Locker.Lock(b.session.Date)
+	unlockMutex := sync.OnceFunc(func() { h.Locker.Unlock(b.session.Date) })
 	defer unlockMutex()
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	existing, err := h.occupancy(ctx, session.Date)
+	existing, err := h.store.Occupancy(ctx, b.session.Date)
 	if err != nil {
 		log.Printf("[DB_ERROR] occupancy: %v", err)
 		http.Error(w, "Database read error", http.StatusInternalServerError)
 		return
 	}
-	if !schedule.Fits(existing, session.Start, session.End, units) {
+	if !schedule.Fits(existing, b.session.Start, b.session.End, b.units) {
 		http.Error(w, "This slot is currently locked or already fully booked", http.StatusConflict)
 		return
 	}
 
-	now := time.Now()
+	now := h.now()
 	newBooking := models.Booking{
 		ID: primitive.NewObjectID(),
 		Team: models.Team{
-			FullName:    userName,
-			PhoneNumber: phone,
-			Email:       email,
+			FullName:    b.userName,
+			PhoneNumber: b.phone,
+			Email:       b.email,
 		},
 		BookingDetails: models.BookingDetails{
-			Date:          session.Date,
-			Time:          session.Label(),
-			PitchType:     req.PitchType,
+			Date:          b.session.Date,
+			Time:          b.session.Label(),
+			PitchType:     b.pitchType,
 			CreatedAt:     now,
 			UpdatedAt:     now,
 			BookingStatus: statusPending,
 		},
 		Transaction: models.Transaction{
 			PaymentStatus: "Pending",
-			Reference:     reference,
-			Amount:        priceKES,
+			Reference:     b.reference,
+			Amount:        price.Charge,
 			Timestamp:     now,
 		},
 	}
+	if price.Applied() {
+		newBooking.Transaction.Discount = models.DiscountMember
+		newBooking.Transaction.ListAmount = price.List
+	}
 
-	if _, err := h.Collection.InsertOne(ctx, newBooking); err != nil {
+	if err := h.store.Insert(ctx, newBooking); err != nil {
 		log.Printf("[DB_ERROR] insert booking: %v", err)
 		http.Error(w, "Failed to initialize booking", http.StatusInternalServerError)
 		return
 	}
 	h.cache.invalidate()
 
+	// The booking is recorded, so the pitch and the member's count are both
+	// settled; the payment call below can take a while and must not hold them.
 	unlockMutex()
+	b.releaseMember()
 
-	if _, err := services.InitiatePayment(h.Config, phone, email, amountInCents, reference); err != nil {
-		filter := bson.M{"transaction.reference": reference}
-		update := bson.M{
-			"$set": bson.M{
-				"transaction.paymentStatus":    "Failed",
-				"bookingDetails.bookingStatus": "Failed",
-			},
-		}
+	if _, err := h.pay(h.Config, b.phone, b.email, price.Charge*100, b.reference); err != nil {
 		failCtx, failCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 		defer failCancel()
-		if _, uerr := h.Collection.UpdateOne(failCtx, filter, update); uerr != nil {
-			log.Printf("[DB_ERROR] mark booking failed: %v", uerr)
-		}
+		logMarkFailed(h.store.MarkFailed(failCtx, b.reference))
 		h.cache.invalidate()
 
 		log.Printf("[PAYMENT_ERROR]: %v", err)
 		http.Error(w, "Payment gateway unavailable", http.StatusBadGateway)
 		return
 	}
+	if price.Applied() {
+		log.Printf("[MEMBER] member price %d (list %d) for booking %s", price.Charge, price.List, b.reference)
+	}
 
-	body, _ := json.Marshal(map[string]string{
-		"message":   "Awaiting Payment",
-		"reference": reference,
+	body, _ := json.Marshal(initiateResponse{
+		Message:   "Awaiting Payment",
+		Reference: b.reference,
+		Amount:    price.Charge,
+		Discount:  newBooking.Transaction.Discount,
 	})
 	writeJSON(w, http.StatusCreated, body)
+}
+
+// initiateResponse is what a started booking answers with. Amount is what the
+// customer's phone is being asked for.
+type initiateResponse struct {
+	Message   string `json:"message"`
+	Reference string `json:"reference"`
+	Amount    int    `json:"amount"`
+	Discount  string `json:"discount,omitempty"`
 }
 
 func (h *BookingHandler) PaystackWebhook(w http.ResponseWriter, r *http.Request) {

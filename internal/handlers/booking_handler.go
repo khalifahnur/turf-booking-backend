@@ -196,7 +196,9 @@ func (h *BookingHandler) GetBookings(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 
 		filter := bson.M{
-			"bookingDetails.date": bson.M{"$gte": schedule.Today(time.Now())},
+			// The operating day is still the previous date until the venue closes
+			// in the small hours, so its late sessions stay on the calendar.
+			"bookingDetails.date": bson.M{"$gte": schedule.OperatingDate(time.Now())},
 			"$or": bson.A{
 				bson.M{"paymentDetails.paymentStatus": "Completed"},
 				bson.M{"bookingDetails.bookingStatus": bson.M{"$in": []string{statusBooked, statusPending}}},
@@ -312,7 +314,7 @@ func toOccupancy(bookings []models.Booking, date string) []schedule.Occupancy {
 		start, end, ok := schedule.ParseStoredRange(b.BookingDetails.Time)
 		if !ok {
 			log.Printf("[DATA] unreadable stored time %q on %s; blocking the date", b.BookingDetails.Time, date)
-			start, end = 0, 24*60
+			start, end = 0, schedule.DayEnd
 		}
 		out = append(out, schedule.Occupancy{Start: start, End: end, Units: units})
 	}
@@ -568,12 +570,13 @@ func (h *BookingHandler) PaystackWebhook(w http.ResponseWriter, r *http.Request)
 		h.cache.invalidate()
 
 		go func() {
+			when, slot := schedule.SMSWhen(updatedBooking.BookingDetails.Date, updatedBooking.BookingDetails.Time)
 			err := services.SendConfirmationSMS(
 				h.Config,
 				updatedBooking.Team.PhoneNumber,
 				updatedBooking.Team.FullName,
-				updatedBooking.BookingDetails.Date,
-				updatedBooking.BookingDetails.Time,
+				when,
+				slot,
 			)
 			if err != nil {
 				log.Printf("[SMS_ERROR] Failed to send SMS for ref %s: %v\n", reference, err)

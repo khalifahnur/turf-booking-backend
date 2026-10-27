@@ -35,6 +35,11 @@ type Config struct {
 	// TrustedProxyHops is how many reverse proxies sit in front of this server
 	// (see middleware.ClientIP). TRUSTED_PROXY_HOPS=auto (the default) infers it.
 	TrustedProxyHops int
+
+	// ExtraHolidays is the raw EXTRA_HOLIDAYS setting: public holidays to add to
+	// the built-in Kenyan calendar (see schedule.ParseHolidays), chiefly the Eid
+	// days, which are only known once the Interior Cabinet Secretary gazettes them.
+	ExtraHolidays string
 }
 
 func LoadConfig() *Config {
@@ -52,6 +57,7 @@ func LoadConfig() *Config {
 		AllowedOrigins:   parseOrigins(os.Getenv("ALLOWED_ORIGINS")),
 		AdminAPIKey:      os.Getenv("ADMIN_API_KEY"),
 		TrustedProxyHops: parseHops(os.Getenv("TRUSTED_PROXY_HOPS")),
+		ExtraHolidays:    os.Getenv("EXTRA_HOLIDAYS"),
 	}
 }
 

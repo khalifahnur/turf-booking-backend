@@ -23,13 +23,18 @@ import (
 // discount covers.
 type quoteMember struct {
 	Percent int `json:"percent"`
-	// Applied is false once the member has used the month's discounted sessions.
+	// Applied is true when this booking is the one that gets the discount.
 	Applied bool `json:"applied"`
-	// Month is the month the session falls in ("2026-11"); Used of Limit
-	// discounted sessions are already held in it, not counting this booking.
+	// Month is the month the session falls in ("2026-11").
 	Month string `json:"month"`
-	Used  int    `json:"used"`
-	Limit int    `json:"limit"`
+	// Sessions is how many 8-a-side 2 hour sessions the number has paid for in
+	// that month, not counting this booking; DiscountSession is the one of the
+	// month the discount is given on (the fourth).
+	Sessions        int `json:"sessions"`
+	DiscountSession int `json:"discountSession"`
+	// DiscountUsed is true when the month's discount has already been given: a
+	// member-priced session is paid for or waiting for its payment.
+	DiscountUsed bool `json:"discountUsed"`
 }
 
 type quoteResponse struct {
@@ -84,11 +89,12 @@ func (h *BookingHandler) Quote(w http.ResponseWriter, r *http.Request) {
 	out := quoteResponse{Amount: price.Charge, ListPrice: price.List}
 	if price.Member != nil {
 		out.Member = &quoteMember{
-			Percent: schedule.MemberDiscountPercent,
-			Applied: price.Applied(),
-			Month:   price.Member.Month,
-			Used:    price.Member.Used,
-			Limit:   schedule.MemberSessionsPerMonth,
+			Percent:         schedule.MemberDiscountPercent,
+			Applied:         price.Applied(),
+			Month:           price.Member.Month,
+			Sessions:        price.Member.Paid,
+			DiscountSession: schedule.MemberDiscountSession,
+			DiscountUsed:    price.Member.DiscountHeld,
 		}
 	}
 	body, err := json.Marshal(out)
@@ -107,17 +113,19 @@ type memberView struct {
 	FullName    string    `json:"fullName"`
 	PhoneNumber string    `json:"phoneNumber"`
 	CreatedAt   time.Time `json:"createdAt"`
-	// Used is how many member-priced sessions they hold in the current month.
-	Used int `json:"used"`
+	// Sessions is how many 8-a-side 2 hour sessions they have paid for in the
+	// current month, and DiscountUsed whether the month's discount has been given.
+	Sessions     int  `json:"sessions"`
+	DiscountUsed bool `json:"discountUsed"`
 }
 
 // memberList is the member list with the rule it applies, so the dashboard
 // never has to repeat it.
 type memberList struct {
-	Month   string       `json:"month"`
-	Percent int          `json:"percent"`
-	Limit   int          `json:"limit"`
-	Members []memberView `json:"members"`
+	Month           string       `json:"month"`
+	Percent         int          `json:"percent"`
+	DiscountSession int          `json:"discountSession"`
+	Members         []memberView `json:"members"`
 }
 
 func (h *BookingHandler) memberListFor(ctx context.Context, month string) (memberList, error) {
@@ -125,18 +133,18 @@ func (h *BookingHandler) memberListFor(ctx context.Context, month string) (membe
 	if err != nil {
 		return memberList{}, err
 	}
-	used, err := h.store.MemberSessionsByPhone(ctx, month)
+	months, err := h.store.MemberMonths(ctx, month)
 	if err != nil {
 		return memberList{}, err
 	}
 	out := memberList{
-		Month:   month,
-		Percent: schedule.MemberDiscountPercent,
-		Limit:   schedule.MemberSessionsPerMonth,
-		Members: make([]memberView, 0, len(members)),
+		Month:           month,
+		Percent:         schedule.MemberDiscountPercent,
+		DiscountSession: schedule.MemberDiscountSession,
+		Members:         make([]memberView, 0, len(members)),
 	}
 	for _, m := range members {
-		out.Members = append(out.Members, viewOf(m, used[m.PhoneNumber]))
+		out.Members = append(out.Members, viewOf(m, months[m.PhoneNumber]))
 	}
 	sort.SliceStable(out.Members, func(i, j int) bool {
 		return strings.ToLower(out.Members[i].FullName) < strings.ToLower(out.Members[j].FullName)
@@ -144,13 +152,14 @@ func (h *BookingHandler) memberListFor(ctx context.Context, month string) (membe
 	return out, nil
 }
 
-func viewOf(m models.Member, used int) memberView {
+func viewOf(m models.Member, month MemberMonth) memberView {
 	return memberView{
-		ID:          m.ID.Hex(),
-		FullName:    m.FullName,
-		PhoneNumber: m.PhoneNumber,
-		CreatedAt:   m.CreatedAt,
-		Used:        used,
+		ID:           m.ID.Hex(),
+		FullName:     m.FullName,
+		PhoneNumber:  m.PhoneNumber,
+		CreatedAt:    m.CreatedAt,
+		Sessions:     month.Paid,
+		DiscountUsed: month.DiscountHeld,
 	}
 }
 
@@ -159,8 +168,8 @@ func (h *BookingHandler) currentMonth() string {
 	return schedule.MonthOf(schedule.OperatingDate(h.now()))
 }
 
-// ListMembers returns the member list with each member's discounted sessions
-// this month. It must be wrapped in AdminOnly: it exposes phone numbers.
+// ListMembers returns the member list with where each member stands this month.
+// It must be wrapped in AdminOnly: it exposes phone numbers.
 func (h *BookingHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	if h.members == nil {
 		http.Error(w, "Members are not enabled", http.StatusServiceUnavailable)
@@ -227,16 +236,16 @@ func (h *BookingHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "The member was added but could not be read back", http.StatusInternalServerError)
 		return
 	}
-	// A number that was a member before and was taken off the list keeps the
-	// sessions it already booked at the member price this month.
-	used, err := h.store.MemberSessions(ctx, phone, h.currentMonth())
+	// The sessions a number has paid for this month count towards its discount
+	// whether or not it was on the list when it booked them.
+	standing, err := h.store.MemberMonth(ctx, phone, h.currentMonth())
 	if err != nil {
-		log.Printf("[DB_ERROR] member sessions: %v", err)
-		used = 0
+		log.Printf("[DB_ERROR] member month: %v", err)
+		standing = MemberMonth{}
 	}
 	log.Printf("[MEMBER] added a member (number ending %s)", phone[len(phone)-3:])
 
-	body, err := json.Marshal(viewOf(*added, used))
+	body, err := json.Marshal(viewOf(*added, standing))
 	if err != nil {
 		http.Error(w, "Failed to add the member", http.StatusInternalServerError)
 		return

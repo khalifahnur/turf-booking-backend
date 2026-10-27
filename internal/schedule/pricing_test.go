@@ -16,8 +16,9 @@ func TestMemberEligibleIsOnlyTheEightASideTwoHourSession(t *testing.T) {
 }
 
 func TestMemberPrice(t *testing.T) {
-	if got, ok := MemberPriceKES(Pitch8Aside, 120); !ok || got != 8_000 {
-		t.Errorf("8-a-side 2 hr member price = %d, %v; want 8000", got, ok)
+	// 80% off Ksh 10,000 leaves Ksh 2,000.
+	if got, ok := MemberPriceKES(Pitch8Aside, 120); !ok || got != 2_000 {
+		t.Errorf("8-a-side 2 hr member price = %d, %v; want 2000", got, ok)
 	}
 	for _, c := range []struct {
 		pitch   string
@@ -31,12 +32,13 @@ func TestMemberPrice(t *testing.T) {
 	}
 }
 
-// The rule is 20% off, to the shilling, and the stated example holds: Ksh 10,000
-// becomes Ksh 8,000. If a price is ever changed so that 20% of it is not a whole
-// number of shillings this fails rather than quietly rounding someone's bill.
+// The rule is 80% off the fourth session, to the shilling: Ksh 10,000, 10,000,
+// 10,000 and then Ksh 2,000, which is the same Ksh 32,000 for the month as four
+// sessions at Ksh 8,000. If a price is ever changed so that 80% of it is not a
+// whole number of shillings this fails rather than quietly rounding someone's bill.
 func TestMemberPriceIsExactlyTheDiscountedListPrice(t *testing.T) {
-	if MemberDiscountPercent != 20 || MemberSessionsPerMonth != 4 {
-		t.Fatalf("the member rule is 20%% off, 4 sessions a month; got %d%%, %d", MemberDiscountPercent, MemberSessionsPerMonth)
+	if MemberDiscountPercent != 80 || MemberDiscountSession != 4 {
+		t.Fatalf("the member rule is 80%% off the 4th session; got %d%%, session %d", MemberDiscountPercent, MemberDiscountSession)
 	}
 	for pitch := range pricesKES {
 		for minutes := range pricesKES[pitch] {
@@ -48,8 +50,11 @@ func TestMemberPriceIsExactlyTheDiscountedListPrice(t *testing.T) {
 				t.Errorf("%d%% of %d is not a whole number of shillings", MemberDiscountPercent, list)
 			}
 			got, ok := MemberPriceKES(pitch, minutes)
-			if !ok || got != list*(100-MemberDiscountPercent)/100 || got >= list {
+			if !ok || got != list*(100-MemberDiscountPercent)/100 || got >= list || got <= 0 {
 				t.Errorf("member price of %s/%d = %d, %v (list %d)", pitch, minutes, got, ok, list)
+			}
+			if month := 3*list + got; month != 32_000 {
+				t.Errorf("three sessions and the discounted fourth cost %d, want Ksh 32,000", month)
 			}
 		}
 	}

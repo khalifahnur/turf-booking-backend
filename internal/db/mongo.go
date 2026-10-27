@@ -50,7 +50,7 @@ func EnsureIndexes(collection *mongo.Collection) {
 			Options: options.Index().SetName("date_status"),
 		},
 		{
-			// Counting a member's discounted sessions in a month.
+			// Where a member stands with the discount in a month.
 			Keys: bson.D{
 				{Key: "team.phoneNumber", Value: 1},
 				{Key: "bookingDetails.date", Value: 1},

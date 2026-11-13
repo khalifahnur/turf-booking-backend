@@ -432,3 +432,47 @@ func Fits(existing []Occupancy, start, end, units int) bool {
 	}
 	return true
 }
+
+// MaxBlockAdvanceDays is how far ahead the admin can block sessions. It is much
+// further than customers can book, so a team's standing slot can be held for a
+// whole season.
+const MaxBlockAdvanceDays = 180
+
+// ParseBlock validates a session the admin wants to take off the booking page.
+// It applies the opening hours and session grid exactly as ParseSession does, so
+// a block always lines up with a session customers could have booked. It differs
+// in two ways: there is no 30 minute cut-off (an admin may hold a session that is
+// about to start), and it reaches MaxBlockAdvanceDays ahead. A session that has
+// already finished is refused. Every returned error is safe to show to the admin.
+func ParseBlock(date, timeRange string, now time.Time) (Session, error) {
+	day, ok := parseDate(date)
+	if !ok {
+		return Session{}, errors.New("invalid date")
+	}
+	nowLocal := now.In(location)
+	current := operatingMidnight(nowLocal)
+	if day.Before(current) {
+		return Session{}, errors.New("this date has already passed")
+	}
+	if day.After(current.AddDate(0, 0, MaxBlockAdvanceDays)) {
+		return Session{}, fmt.Errorf("sessions can only be blocked up to %d days ahead", MaxBlockAdvanceDays)
+	}
+
+	start, end, err := parseRangeStrict(timeRange)
+	if err != nil {
+		return Session{}, err
+	}
+	if minutes := end - start; minutes != 60 && minutes != 120 {
+		return Session{}, errors.New("sessions are either 1 hour or 2 hours long")
+	}
+	kind, _ := kindOfDay(day)
+	if !offered(kind, start, end) {
+		return Session{}, errors.New("that time is not a session on that day")
+	}
+
+	endsAt := day.Add(time.Duration(end) * time.Minute)
+	if !endsAt.After(nowLocal) {
+		return Session{}, errors.New("that session has already finished")
+	}
+	return Session{Date: date, Start: start, End: end, end: endsAt}, nil
+}

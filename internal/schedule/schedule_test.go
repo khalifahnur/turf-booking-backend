@@ -559,3 +559,52 @@ func TestSnapshotStartsOnTheOperatingDay(t *testing.T) {
 		t.Errorf("from 01:00 the calendar should start on the 16th, got %s", snap.Today)
 	}
 }
+
+func TestParseBlock(t *testing.T) {
+	// now is Wednesday 2026-10-14, 12:00.
+	good := []struct{ date, rng string }{
+		{"2026-10-14", "19:00 – 21:00"}, // later today
+		{"2026-10-15", "07:00 – 08:00"}, // a weekday morning window
+		{"2026-10-17", "07:00 – 09:00"}, // a Saturday
+		{"2026-10-16", "23:00 – 01:00"}, // runs past midnight
+		{"2026-10-16", "00:00 – 01:00"}, // after midnight, same operating day
+		{"2027-04-10", "21:00 – 23:00"}, // 178 days ahead: far past what customers can book
+	}
+	for _, c := range good {
+		s, err := ParseBlock(c.date, c.rng, now)
+		if err != nil || s.Date != c.date || s.Label() != c.rng {
+			t.Errorf("ParseBlock(%q, %q) = %+v, %v; want it accepted as it is", c.date, c.rng, s, err)
+		}
+	}
+
+	bad := []struct{ date, rng, want string }{
+		{"2026-10-13", "19:00 – 21:00", "already passed"},
+		{"2026-10-14", "07:00 – 08:00", "already finished"}, // this morning
+		{"2026-10-14", "10:00 – 11:00", "not a session"},    // not an opening hour on a weekday
+		{"2026-10-15", "19:30 – 20:30", "not a session"},    // off the grid
+		{"2026-10-15", "18:00 – 21:00", "1 hour or 2 hours"},
+		{"2026-10-15", "nonsense", "invalid time range"},
+		{"2026-13-45", "19:00 – 21:00", "invalid date"},
+		{"2027-04-20", "19:00 – 21:00", "ahead"}, // 188 days
+	}
+	for _, c := range bad {
+		if _, err := ParseBlock(c.date, c.rng, now); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("ParseBlock(%q, %q) error = %v, want one containing %q", c.date, c.rng, err, c.want)
+		}
+	}
+}
+
+// The grid and opening hours are those of ParseSession: whatever a customer could
+// book, the admin can block, and nothing else.
+func TestParseBlockOffersTheSameSessionsAsBooking(t *testing.T) {
+	for _, date := range []string{"2026-10-15", "2026-10-17", "2026-10-20"} { // weekday, Saturday, Mashujaa Day
+		kind, _, _ := KindOf(date)
+		for _, minutes := range []int{60, 120} {
+			for _, slot := range Slots(kind, minutes) {
+				if _, err := ParseBlock(date, slot.Label(), now); err != nil {
+					t.Errorf("%s %s is a session customers can book but cannot be blocked: %v", date, slot.Label(), err)
+				}
+			}
+		}
+	}
+}

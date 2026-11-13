@@ -276,6 +276,95 @@ func (f *fakeMembers) Remove(_ context.Context, phone string) (bool, error) {
 	return ok, nil
 }
 
+// ---- in-memory blocks ---------------------------------------------------------
+
+// fakeBlocks runs the same filters the MongoDB block store sends.
+type fakeBlocks struct {
+	mu       sync.Mutex
+	rows     []models.Block
+	failures map[string]error
+}
+
+func (f *fakeBlocks) pick(filter bson.M) []models.Block {
+	var hit []models.Block
+	for _, b := range f.rows {
+		if matches(docOf(b), filter) {
+			hit = append(hit, b)
+		}
+	}
+	return hit
+}
+
+func (f *fakeBlocks) all() []models.Block {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]models.Block(nil), f.rows...)
+}
+
+func (f *fakeBlocks) OnDate(_ context.Context, date string) ([]models.Block, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["OnDate"]; err != nil {
+		return nil, err
+	}
+	return f.pick(blockDateFilter(date)), nil
+}
+
+func (f *fakeBlocks) From(_ context.Context, date string) ([]models.Block, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["From"]; err != nil {
+		return nil, err
+	}
+	return f.pick(blockFromFilter(date)), nil
+}
+
+func (f *fakeBlocks) Insert(_ context.Context, b models.Block) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["Insert"]; err != nil {
+		return err
+	}
+	f.rows = append(f.rows, b)
+	return nil
+}
+
+func (f *fakeBlocks) Remove(_ context.Context, id primitive.ObjectID) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["Remove"]; err != nil {
+		return false, err
+	}
+	kept, removed := f.rows[:0], false
+	for _, b := range f.rows {
+		if matches(docOf(b), blockIDFilter(id)) {
+			removed = true
+			continue
+		}
+		kept = append(kept, b)
+	}
+	f.rows = kept
+	return removed, nil
+}
+
+func (f *fakeBlocks) RemoveSeries(_ context.Context, seriesID, fromDate string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["RemoveSeries"]; err != nil {
+		return 0, err
+	}
+	kept, n := f.rows[:0], 0
+	for _, b := range f.rows {
+		if matches(docOf(b), blockSeriesFilter(seriesID, fromDate)) {
+			n++
+			continue
+		}
+		kept = append(kept, b)
+	}
+	f.rows = kept
+	return n, nil
+}
+
 // ---- the payment gateway ------------------------------------------------------
 
 // fakePayments records what the customer's phone would be asked for.

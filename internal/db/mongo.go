@@ -119,3 +119,29 @@ func campIndexModels() []mongo.IndexModel {
 		},
 	}
 }
+
+// EnsureBlockIndexes makes the per-date lookup the booking check does, and the
+// lifting of a whole series, fast. As with the other indexes, a failure is
+// logged rather than fatal.
+func EnsureBlockIndexes(collection *mongo.Collection) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := collection.Indexes().CreateMany(ctx, blockIndexModels())
+	if err != nil {
+		log.Printf("[DB] could not ensure block indexes: %v", err)
+	}
+}
+
+func blockIndexModels() []mongo.IndexModel {
+	return []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "date", Value: 1}},
+			Options: options.Index().SetName("block_date"),
+		},
+		{
+			Keys:    bson.D{{Key: "seriesId", Value: 1}, {Key: "date", Value: 1}},
+			Options: options.Index().SetName("block_series_date"),
+		},
+	}
+}

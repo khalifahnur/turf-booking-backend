@@ -23,6 +23,10 @@ func (f *flow) adminMux() *http.ServeMux {
 	mux.Handle("GET /api/v1/admin/members", f.h.AdminOnly(f.h.ListMembers))
 	mux.Handle("POST /api/v1/admin/members", f.h.AdminOnly(f.h.AddMember))
 	mux.Handle("DELETE /api/v1/admin/members/{phone}", f.h.AdminOnly(f.h.RemoveMember))
+	mux.Handle("GET /api/v1/admin/blocks", f.h.AdminOnly(f.h.ListBlocks))
+	mux.Handle("POST /api/v1/admin/blocks", f.h.AdminOnly(f.h.CreateBlocks))
+	mux.Handle("DELETE /api/v1/admin/blocks/{id}", f.h.AdminOnly(f.h.RemoveBlock))
+	mux.Handle("DELETE /api/v1/admin/block-series/{series}", f.h.AdminOnly(f.h.RemoveBlockSeries))
 	return mux
 }
 

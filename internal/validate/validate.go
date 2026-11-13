@@ -103,3 +103,36 @@ func KenyanMobile(s string) (string, error) {
 	}
 	return s, nil
 }
+
+// Note tidies a short free-text note the admin writes for themselves (who a
+// blocked session is being held for, say). It is only ever shown back to the
+// admin, so unlike Name it allows ordinary punctuation, but it still refuses
+// markup and anything that draws as blank or breaks a line.
+func Note(s string) (string, error) {
+	s = norm.NFC.String(s)
+	s = strings.Join(strings.Fields(s), " ")
+	n := utf8.RuneCountInString(s)
+	if n < 2 || n > 80 {
+		return "", errors.New("note must be between 2 and 80 characters")
+	}
+	substantial, marks := 0, 0
+	for _, r := range s {
+		switch {
+		case r == '<' || r == '>' || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || invisibleFiller(r):
+			return "", errors.New("note contains unsupported characters")
+		case unicode.IsMark(r):
+			if marks++; marks > maxMarksInARow {
+				return "", errors.New("note contains unsupported characters")
+			}
+		default:
+			marks = 0
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				substantial++
+			}
+		}
+	}
+	if substantial < 2 {
+		return "", errors.New("note must include at least two letters or numbers")
+	}
+	return s, nil
+}

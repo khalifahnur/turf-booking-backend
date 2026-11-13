@@ -26,7 +26,7 @@ func main() {
 		log.Fatalf("Refusing to start: %v", err)
 	}
 	if cfg.AdminAPIKey == "" {
-		log.Println("ADMIN_API_KEY is not set: the admin endpoints (bookings, members and camp registrations) are disabled")
+		log.Println("ADMIN_API_KEY is not set: the admin endpoints (bookings, members, blocked sessions and camp registrations) are disabled")
 	}
 
 	configureHolidays(cfg)
@@ -56,6 +56,11 @@ func main() {
 	db.EnsureMemberIndexes(memberCollection)
 	bookingHandler.AttachMembers(handlers.NewMongoMemberStore(memberCollection))
 
+	// Sessions the admin blocks hold the pitch like a booking does (see BlockStore).
+	blockCollection := mongoClient.Database("arena").Collection("blocks")
+	db.EnsureBlockIndexes(blockCollection)
+	bookingHandler.AttachBlocks(handlers.NewMongoBlockStore(blockCollection))
+
 	campCollection := mongoClient.Database("arena").Collection("camp_registrations")
 	db.EnsureCampIndexes(campCollection)
 	services.StartCampCleanupWorker(campCollection)
@@ -84,6 +89,10 @@ func main() {
 	mux.Handle("GET /api/v1/admin/members", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.ListMembers)))
 	mux.Handle("POST /api/v1/admin/members", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.AddMember)))
 	mux.Handle("DELETE /api/v1/admin/members/{phone}", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.RemoveMember)))
+	mux.Handle("GET /api/v1/admin/blocks", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.ListBlocks)))
+	mux.Handle("POST /api/v1/admin/blocks", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.CreateBlocks)))
+	mux.Handle("DELETE /api/v1/admin/blocks/{id}", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.RemoveBlock)))
+	mux.Handle("DELETE /api/v1/admin/block-series/{series}", adminLimit.ByIP(hops, bookingHandler.AdminOnly(bookingHandler.RemoveBlockSeries)))
 	mux.Handle("POST /api/v1/quote", quoteLimit.ByIP(hops, http.HandlerFunc(bookingHandler.Quote)))
 	mux.Handle("POST /api/v1/initiate/paystack/push-stk", bookLimit.ByIP(hops, http.HandlerFunc(bookingHandler.InitiateBooking)))
 	mux.Handle("POST /api/v1/camp/register", campLimit.ByIP(hops, http.HandlerFunc(campHandler.Register)))

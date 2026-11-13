@@ -45,3 +45,18 @@ func TestMemberIndexes(t *testing.T) {
 		t.Errorf("a member's number must be uniquely indexed, got %v", models[0])
 	}
 }
+
+func TestBlockIndexes(t *testing.T) {
+	byName := map[string]bson.D{}
+	for _, m := range blockIndexModels() {
+		byName[*m.Options.Name], _ = m.Keys.(bson.D)
+	}
+	// Every booking reads the blocks of its date while the date is locked.
+	if d := byName["block_date"]; len(d) != 1 || d[0].Key != "date" {
+		t.Errorf("block_date index = %v", d)
+	}
+	// Lifting a series filters on the series and the date.
+	if s := byName["block_series_date"]; len(s) != 2 || s[0].Key != "seriesId" || s[1].Key != "date" {
+		t.Errorf("block_series_date index = %v", s)
+	}
+}

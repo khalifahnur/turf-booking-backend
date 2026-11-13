@@ -137,3 +137,44 @@ func TestEmail(t *testing.T) {
 		}
 	}
 }
+
+func TestNote(t *testing.T) {
+	good := map[string]string{
+		"Paying first: Brian (0712 345 678)": "Paying first: Brian (0712 345 678)",
+		"  Kibera   Utd - Mon/Wed/Thu/Sat  ": "Kibera Utd - Mon/Wed/Thu/Sat",
+		"Team O'Neil, 4x a week!":            "Team O'Neil, 4x a week!",
+		"Wanjiru – paid via M-Pesa":          "Wanjiru – paid via M-Pesa",
+		"café ☕ league":                      "café ☕ league",
+	}
+	for in, want := range good {
+		if got, err := Note(in); err != nil || got != want {
+			t.Errorf("Note(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	bad := map[string]string{
+		"empty":             "",
+		"blanks":            "     ",
+		"one letter":        "B",
+		"only punctuation":  "!!!!!",
+		"markup":            "<b>Brian</b>",
+		"angle bracket":     "a > b",
+		"newline":           "Brian\x00x",
+		"bell":              "Brian\x07 x",
+		"zero-width joiner": "Bri‍an",
+		"invisible filler":  "ㅤㅤ ab",
+		"stacked marks":     "á̂̃̄ b",
+		"too long":          strings.Repeat("a", 81),
+	}
+	for name, in := range bad {
+		if got, err := Note(in); err == nil {
+			t.Errorf("%s: Note(%q) = %q, want an error", name, in, got)
+		}
+	}
+	if _, err := Note(strings.Repeat("a", 80)); err != nil {
+		t.Errorf("80 characters must be allowed: %v", err)
+	}
+	// A line break is whitespace, so it is tidied to a space rather than kept.
+	if got, err := Note("Brian\nKamau"); err != nil || got != "Brian Kamau" {
+		t.Errorf("Note with a line break = %q, %v; want the break turned into a space", got, err)
+	}
+}

@@ -42,14 +42,16 @@ type flow struct {
 	h        *BookingHandler
 	bookings *fakeBookings
 	members  *fakeMembers
+	blocks   *fakeBlocks
 	gateway  *fakePayments
 }
 
 func newFlow(memberPhones ...string) *flow {
-	f := &flow{bookings: &fakeBookings{}, members: newFakeMembers(memberPhones...), gateway: &fakePayments{}}
+	f := &flow{bookings: &fakeBookings{}, members: newFakeMembers(memberPhones...), blocks: &fakeBlocks{}, gateway: &fakePayments{}}
 	h := NewBookingHandler(nil, &config.Config{AdminAPIKey: testAdminKey}, ws.NewPaymentHub())
 	h.store = f.bookings
 	h.members = f.members
+	h.blocks = f.blocks
 	h.pay = f.gateway.pay
 	h.now = func() time.Time { return flowNow }
 	h.phoneLimiter = middleware.NewLimiter(6_000_000, 1_000_000) // out of the way unless a test wants it

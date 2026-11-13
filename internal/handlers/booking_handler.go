@@ -64,6 +64,9 @@ type BookingHandler struct {
 	// list, and leaving it nil switches the member discount off.
 	store   bookingStore
 	members MemberStore
+	// blocks is the list of sessions the admin has taken off the booking page.
+	// Leaving it nil switches blocking off.
+	blocks BlockStore
 
 	// phoneLimiter stops the API being used to spam someone else's handset with
 	// M-Pesa prompts.
@@ -245,6 +248,12 @@ func (h *BookingHandler) GetBookings(w http.ResponseWriter, r *http.Request) {
 				"pitchType": b.BookingDetails.PitchType,
 			})
 		}
+		// Blocked sessions are as taken as booked ones.
+		blocked, err := h.blockedSlots(ctx)
+		if err != nil {
+			return nil, err
+		}
+		bookedSlots = append(bookedSlots, blocked...)
 		return json.Marshal(bookedSlots)
 	})
 	if err != nil {
@@ -496,6 +505,16 @@ func (h *BookingHandler) finishBooking(w http.ResponseWriter, r *http.Request, b
 		log.Printf("[DB_ERROR] occupancy: %v", err)
 		http.Error(w, "Database read error", http.StatusInternalServerError)
 		return
+	}
+	// Sessions the admin has blocked hold the pitch like a paid booking does.
+	if h.blocks != nil {
+		blocks, err := h.blocks.OnDate(ctx, b.session.Date)
+		if err != nil {
+			log.Printf("[DB_ERROR] blocks: %v", err)
+			http.Error(w, "Database read error", http.StatusInternalServerError)
+			return
+		}
+		existing = append(existing, blockOccupancy(blocks, b.session.Date)...)
 	}
 	if !schedule.Fits(existing, b.session.Start, b.session.End, b.units) {
 		http.Error(w, "This slot is currently locked or already fully booked", http.StatusConflict)

@@ -60,3 +60,22 @@ func TestBlockIndexes(t *testing.T) {
 		t.Errorf("block_series_date index = %v", s)
 	}
 }
+
+func TestRegistrationIndexes(t *testing.T) {
+	byName := map[string]bson.D{}
+	unique := map[string]bool{}
+	for _, m := range registrationIndexModels() {
+		name := *m.Options.Name
+		byName[name], _ = m.Keys.(bson.D)
+		unique[name] = m.Options.Unique != nil && *m.Options.Unique
+	}
+	// A duplicate reference would let one payment settle two registrations.
+	ref := byName["uniq_registration_reference"]
+	if len(ref) != 1 || ref[0].Key != "payment.reference" || !unique["uniq_registration_reference"] {
+		t.Errorf("payment.reference must be uniquely indexed, got %v (unique=%v)", ref, unique["uniq_registration_reference"])
+	}
+	list := byName["kind_status_created"]
+	if len(list) != 3 || list[0].Key != "kind" || list[1].Key != "status" || list[2].Key != "createdAt" {
+		t.Errorf("kind_status_created index = %v", list)
+	}
+}

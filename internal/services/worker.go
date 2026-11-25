@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"turf-booking-backend/internal/camp"
+	"turf-booking-backend/internal/registration"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -88,6 +89,52 @@ func StartCampCleanupWorker(collection *mongo.Collection) {
 				log.Printf("Camp cleanup (purge) error: %v", err)
 			} else if purged.DeletedCount > 0 {
 				log.Printf("Removed %d abandoned camp registration(s)", purged.DeletedCount)
+			}
+			cancel()
+		}
+	}()
+}
+
+// StartRegistrationCleanupWorker tidies tournament and academy registrations
+// whose payment never finished, the way the camp worker does: an unanswered
+// prompt is marked Expired and kept for a week so a payment that lands late can
+// still settle it, and only then is the dead record removed.
+func registrationExpireFilter(now time.Time) bson.M {
+	return bson.M{"status": registration.StatusPending, "createdAt": bson.M{"$lt": now.Add(-campExpireAfter)}}
+}
+
+func registrationExpireUpdate(now time.Time) bson.M {
+	return bson.M{"$set": bson.M{"status": registration.StatusExpired, "updatedAt": now}}
+}
+
+func registrationPurgeFilter(now time.Time) bson.M {
+	return bson.M{
+		"status":    bson.M{"$in": []string{registration.StatusExpired, registration.StatusFailed}},
+		"updatedAt": bson.M{"$lt": now.Add(-campPurgeAfter)},
+	}
+}
+
+func StartRegistrationCleanupWorker(collection *mongo.Collection) {
+	ticker := time.NewTicker(5 * time.Minute)
+
+	go func() {
+		defer ticker.Stop()
+		for range ticker.C {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			now := time.Now()
+
+			expired, err := collection.UpdateMany(ctx, registrationExpireFilter(now), registrationExpireUpdate(now))
+			if err != nil {
+				log.Printf("Registration cleanup (expire) error: %v", err)
+			} else if expired.ModifiedCount > 0 {
+				log.Printf("Expired %d unpaid registration(s)", expired.ModifiedCount)
+			}
+
+			purged, err := collection.DeleteMany(ctx, registrationPurgeFilter(now))
+			if err != nil {
+				log.Printf("Registration cleanup (purge) error: %v", err)
+			} else if purged.DeletedCount > 0 {
+				log.Printf("Removed %d abandoned registration(s)", purged.DeletedCount)
 			}
 			cancel()
 		}

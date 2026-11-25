@@ -56,6 +56,27 @@ func campConfirmationMessage(child, what, when string, totalKES int) string {
 		child, what, when, camp.FormatKES(totalKES), directionsLink)
 }
 
+// SendTournamentConfirmationSMS tells a team its tournament place is paid for.
+// categories reads "U10 and U15".
+func SendTournamentConfirmationSMS(cfg *config.Config, phone, team, categories string, totalKES int) error {
+	return sendSMS(cfg, phone, tournamentConfirmationMessage(team, categories, totalKES))
+}
+
+func tournamentConfirmationMessage(team, categories string, totalKES int) string {
+	return fmt.Sprintf("Confirmed! %s is registered for the K-Arena Tournament: %s. Paid %s. Directions: %s",
+		team, categories, camp.FormatKES(totalKES), directionsLink)
+}
+
+// SendAcademyConfirmationSMS tells a parent their child's academy registration is paid for.
+func SendAcademyConfirmationSMS(cfg *config.Config, phone, player string, totalKES int) error {
+	return sendSMS(cfg, phone, academyConfirmationMessage(player, totalKES))
+}
+
+func academyConfirmationMessage(player string, totalKES int) string {
+	return fmt.Sprintf("Confirmed! %s is registered at St. Sebastian Sports Academy. Paid %s. Thank you.",
+		player, camp.FormatKES(totalKES))
+}
+
 func sendSMS(cfg *config.Config, phone, message string) error {
 	formattedPhone := FormatPhoneE164(phone)
 

@@ -18,3 +18,22 @@ func TestCampConfirmationMessage(t *testing.T) {
 		t.Errorf("worst-case message is %d characters", len(long))
 	}
 }
+
+func TestTournamentConfirmationMessage(t *testing.T) {
+	got := tournamentConfirmationMessage("Kibera Stars", "U10 and U15", 2000)
+	want := "Confirmed! Kibera Stars is registered for the K-Arena Tournament: U10 and U15. Paid Ksh 2,000. Directions: " + directionsLink
+	if got != want {
+		t.Errorf("message = %q\nwant      %q", got, want)
+	}
+	if long := tournamentConfirmationMessage(strings.Repeat("a", 60), "U10 and U15", 2000); len(long) > 320 {
+		t.Errorf("worst-case message is %d characters", len(long))
+	}
+}
+
+func TestAcademyConfirmationMessage(t *testing.T) {
+	got := academyConfirmationMessage("Amani Otieno", 5000)
+	want := "Confirmed! Amani Otieno is registered at St. Sebastian Sports Academy. Paid Ksh 5,000. Thank you."
+	if got != want {
+		t.Errorf("message = %q\nwant      %q", got, want)
+	}
+}

@@ -24,6 +24,7 @@ import (
 	"turf-booking-backend/internal/config"
 	"turf-booking-backend/internal/middleware"
 	"turf-booking-backend/internal/models"
+	"turf-booking-backend/internal/registration"
 	"turf-booking-backend/internal/schedule"
 	"turf-booking-backend/internal/services"
 	"turf-booking-backend/internal/utils"
@@ -74,8 +75,10 @@ type BookingHandler struct {
 	upgrader     websocket.Upgrader
 	cache        bookingsCache
 
-	// camp shares this handler's Paystack webhook and payment WebSocket.
-	camp *CampHandler
+	// camp and registrations share this handler's Paystack webhook and payment
+	// WebSocket.
+	camp          *CampHandler
+	registrations *RegistrationHandler
 
 	// Replaceable so tests can run the whole booking flow without Paystack or a
 	// real clock.
@@ -86,6 +89,10 @@ type BookingHandler struct {
 // AttachCamp lets the webhook and the payment WebSocket serve camp payments
 // as well as pitch bookings.
 func (h *BookingHandler) AttachCamp(c *CampHandler) { h.camp = c }
+
+// AttachRegistrations lets the webhook and the payment WebSocket serve tournament
+// and academy registrations as well.
+func (h *BookingHandler) AttachRegistrations(r *RegistrationHandler) { h.registrations = r }
 
 // AttachMembers turns the member discount on, for the numbers on this list.
 func (h *BookingHandler) AttachMembers(m MemberStore) { h.members = m }
@@ -163,10 +170,10 @@ func newReference() (string, error) {
 }
 
 // validReference accepts the current 32-hex references, the 24-hex ObjectID
-// references issued before they were randomised, and camp references
-// ("camp-" plus 32 hex).
+// references issued before they were randomised, and camp, tournament and
+// academy references (a prefix plus 32 hex).
 func validReference(s string) bool {
-	s = strings.TrimPrefix(s, camp.ReferencePrefix)
+	s = registration.TrimReferencePrefix(strings.TrimPrefix(s, camp.ReferencePrefix))
 	if len(s) != 32 && len(s) != 24 {
 		return false
 	}
@@ -648,6 +655,23 @@ func (h *BookingHandler) PaystackWebhook(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// So are tournament and academy registrations.
+	if registration.IsReference(reference) {
+		if h.registrations == nil {
+			log.Printf("Webhook for registration reference %s ignored: registrations not attached\n", reference)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		h.registrations.HandlePaystackEvent(w, r, paystackEvent{
+			Event:       event.Event,
+			Reference:   reference,
+			Status:      event.Data.Status,
+			Currency:    event.Data.Currency,
+			AmountCents: event.Data.Amount,
+		})
+		return
+	}
+
 	if event.Event == "charge.success" {
 
 		filter := bson.M{
@@ -717,6 +741,13 @@ func (h *BookingHandler) paymentStatus(reference string) (string, error) {
 			return "", errUnknownReference
 		}
 		return h.camp.PaymentStatus(ctx, reference)
+	}
+
+	if registration.IsReference(reference) {
+		if h.registrations == nil {
+			return "", errUnknownReference
+		}
+		return h.registrations.PaymentStatus(ctx, reference)
 	}
 
 	var b models.Booking

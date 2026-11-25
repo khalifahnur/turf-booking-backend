@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"turf-booking-backend/internal/camp"
+	"turf-booking-backend/internal/registration"
 
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -38,5 +39,33 @@ func TestCampPurgeFilter(t *testing.T) {
 	}
 	if !reflect.DeepEqual(f["updatedAt"], bson.M{"$lt": workerNow.Add(-7 * 24 * time.Hour)}) {
 		t.Errorf("purge cut-off = %v", f["updatedAt"])
+	}
+}
+
+// Tournament and academy registrations are tidied exactly as the camp's are: only
+// a long-abandoned Pending one expires, and only dead ones are ever deleted.
+func TestRegistrationCleanupFilters(t *testing.T) {
+	f := registrationExpireFilter(workerNow)
+	if f["status"] != registration.StatusPending {
+		t.Errorf("only Pending registrations expire, got %v", f["status"])
+	}
+	if !reflect.DeepEqual(f["createdAt"], bson.M{"$lt": workerNow.Add(-30 * time.Minute)}) {
+		t.Errorf("createdAt = %v", f["createdAt"])
+	}
+	// Far longer than the tournament hold, so a place is never released twice over.
+	if campExpireAfter <= registration.HoldWindow {
+		t.Errorf("registrations expire after %v, which must be longer than the %v hold", campExpireAfter, registration.HoldWindow)
+	}
+	set := registrationExpireUpdate(workerNow)["$set"].(bson.M)
+	if set["status"] != registration.StatusExpired || set["updatedAt"] != workerNow {
+		t.Errorf("expire update = %v", set)
+	}
+
+	p := registrationPurgeFilter(workerNow)
+	if !reflect.DeepEqual(p["status"], bson.M{"$in": []string{registration.StatusExpired, registration.StatusFailed}}) {
+		t.Errorf("purge status = %v; paid and pending registrations must never be deleted", p["status"])
+	}
+	if !reflect.DeepEqual(p["updatedAt"], bson.M{"$lt": workerNow.Add(-7 * 24 * time.Hour)}) {
+		t.Errorf("purge cut-off = %v", p["updatedAt"])
 	}
 }

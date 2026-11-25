@@ -70,9 +70,12 @@ const (
 )
 
 // HoldWindow is how long an unpaid tournament registration keeps its place. An
-// M-Pesa prompt stays answerable for about a minute; the rest is slack for a slow
-// PIN, after which the place goes back to whoever is next.
-const HoldWindow = 10 * time.Minute
+// M-Pesa prompt stays answerable for about a minute, so this is a little longer
+// than that: after it the place goes back to whoever is next, and the team that
+// let it lapse can register again straight away. A payment that still arrives
+// later settles as usual, unless the place was given away meanwhile, in which
+// case it is flagged for a refund (see OverCapacity).
+const HoldWindow = 3 * time.Minute
 
 // Category is an age group of the tournament.
 type Category struct {

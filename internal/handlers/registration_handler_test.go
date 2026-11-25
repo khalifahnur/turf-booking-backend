@@ -168,6 +168,7 @@ type infoJSON struct {
 	MinPlayers       int        `json:"minPlayers"`
 	MaxPlayers       int        `json:"maxPlayers"`
 	RulesVersion     string     `json:"rulesVersion"`
+	HoldMinutes      int        `json:"holdMinutes"`
 	Categories       []slotView `json:"categories"`
 }
 
@@ -368,8 +369,8 @@ func TestAnUncertainPromptKeepsThePlaceUntilItIsKnown(t *testing.T) {
 	f := newRegFlow()
 	f.gateway.err = fmt.Errorf("%w: timeout", servicesUncertain())
 	rec, _ := f.team(nil)
-	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "check your phone") {
-		t.Fatalf("uncertain prompt = %d %q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "check your phone") || !strings.Contains(rec.Body.String(), "wait about 3 minutes") {
+		t.Fatalf("uncertain prompt = %d %q, want it to say how long to wait (the hold)", rec.Code, rec.Body.String())
 	}
 	rows := f.store.all()
 	if len(rows) != 1 || rows[0].Status != "Pending" {
@@ -887,7 +888,7 @@ func TestThePublicTournamentInfoStatesTheRulesOfTheFormAndNamesNobody(t *testing
 		t.Errorf("the public info leaked a team: %s", rec.Body.String())
 	}
 	info := f.info(t)
-	if info.Fee != 2_000 || info.TeamsPerCategory != 6 || info.MinPlayers != 5 || info.MaxPlayers != 40 || info.RulesVersion != registration.RulesVersion {
+	if info.Fee != 2_000 || info.TeamsPerCategory != 6 || info.MinPlayers != 5 || info.MaxPlayers != 40 || info.RulesVersion != registration.RulesVersion || info.HoldMinutes != 3 {
 		t.Errorf("info = %+v", info)
 	}
 	if len(info.Categories) != 2 || info.Categories[0].ID != "u10" || info.Categories[0].Label != "U10" || info.Categories[1].ID != "u15" {

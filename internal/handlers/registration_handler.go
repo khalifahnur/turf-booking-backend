@@ -160,6 +160,7 @@ func (h *RegistrationHandler) TournamentInfo(w http.ResponseWriter, r *http.Requ
 		"minPlayers":       registration.MinPlayers,
 		"maxPlayers":       registration.MaxPlayers,
 		"rulesVersion":     registration.RulesVersion,
+		"holdMinutes":      int(registration.HoldWindow / time.Minute),
 		"categories":       slotViews(slots),
 	})
 	if err != nil {
@@ -301,7 +302,7 @@ func (h *RegistrationHandler) RegisterTournament(w http.ResponseWriter, r *http.
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	h.start(ctx, w, r, reg, unlock, map[string]any{"categories": entry.Categories})
+	h.start(ctx, w, r, reg, unlock, registration.HoldWindow, map[string]any{"categories": entry.Categories})
 }
 
 // ---- the academy ------------------------------------------------------------
@@ -401,14 +402,14 @@ func (h *RegistrationHandler) RegisterAcademy(w http.ResponseWriter, r *http.Req
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	h.start(ctx, w, r, reg, unlock, nil)
+	h.start(ctx, w, r, reg, unlock, academyPendingWindow, nil)
 }
 
 // ---- paying -----------------------------------------------------------------
 
 // start records a validated registration as Pending, lets go of the lock that
 // made the checks before it atomic, and sends the M-Pesa prompt for its fee.
-func (h *RegistrationHandler) start(ctx context.Context, w http.ResponseWriter, r *http.Request, reg models.Registration, unlock func(), extra map[string]any) {
+func (h *RegistrationHandler) start(ctx context.Context, w http.ResponseWriter, r *http.Request, reg models.Registration, unlock func(), wait time.Duration, extra map[string]any) {
 	if err := h.Store.Insert(ctx, reg); err != nil {
 		log.Printf("[DB_ERROR] registration insert: %v", err)
 		h.phoneLimiter.Refund(reg.PhoneNumber) // nothing was sent, so this attempt should not count
@@ -426,7 +427,7 @@ func (h *RegistrationHandler) start(ctx context.Context, w http.ResponseWriter, 
 			// Paystack may have sent the prompt even though we did not hear back. The
 			// registration stays Pending, so its place is still held, an immediate
 			// retry is refused, and a payment that does arrive still settles it.
-			middleware.UserError(w, "We could not confirm that the M-Pesa prompt was sent. Please check your phone: if a prompt arrived, enter your PIN and we will confirm by SMS. If nothing arrives, wait about 2 minutes and try again.", http.StatusBadGateway)
+			middleware.UserError(w, fmt.Sprintf("We could not confirm that the M-Pesa prompt was sent. Please check your phone: if a prompt arrived, enter your PIN and we will confirm by SMS. If nothing arrives, wait about %d minutes and try again.", int(wait/time.Minute)), http.StatusBadGateway)
 			return
 		}
 		failCtx, failCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
@@ -681,6 +682,7 @@ func (h *RegistrationHandler) ListTournamentAdmin(w http.ResponseWriter, r *http
 	body, err := json.Marshal(map[string]any{
 		"teamsPerCategory": registration.TeamsPerCategory,
 		"fee":              registration.TournamentFeeKES,
+		"holdMinutes":      int(registration.HoldWindow / time.Minute),
 		"categories":       slotViews(slots),
 		"registrations":    views,
 	})

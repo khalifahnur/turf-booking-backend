@@ -26,7 +26,7 @@ func main() {
 		log.Fatalf("Refusing to start: %v", err)
 	}
 	if cfg.AdminAPIKey == "" {
-		log.Println("ADMIN_API_KEY is not set: the admin endpoints (bookings, members, blocked sessions and camp registrations) are disabled")
+		log.Println("ADMIN_API_KEY is not set: the admin endpoints (bookings, members, blocked sessions, and camp, tournament and academy registrations) are disabled")
 	}
 
 	configureHolidays(cfg)
@@ -68,6 +68,14 @@ func main() {
 	// The Paystack webhook and the payment WebSocket are shared with the camp.
 	bookingHandler.AttachCamp(campHandler)
 
+	// Tournament and academy registrations, paid by M-Pesa like the camp. Their
+	// payments come back through the same Paystack webhook and WebSocket.
+	registrationCollection := mongoClient.Database("arena").Collection("registrations")
+	db.EnsureRegistrationIndexes(registrationCollection)
+	services.StartRegistrationCleanupWorker(registrationCollection)
+	registrationHandler := handlers.NewRegistrationHandler(handlers.NewMongoRegistrationStore(registrationCollection), cfg, hub)
+	bookingHandler.AttachRegistrations(registrationHandler)
+
 	// One bucket per client IP for each class of endpoint. The numbers leave
 	// plenty of room for a busy shared network (the calendar polls every 3s) but
 	// stop a single source from hammering the database or the payment gateway.
@@ -77,6 +85,9 @@ func main() {
 	wsLimit := middleware.NewLimiter(30, 10)
 	adminLimit := middleware.NewLimiter(30, 10)
 	campLimit := middleware.NewLimiter(20, 10)
+	// Starting a registration sends an M-Pesa prompt and holds a tournament place,
+	// so it is limited like a booking.
+	registerLimit := middleware.NewLimiter(6, 5)
 	// A price check is made when a customer has typed their number, so a few a
 	// minute is plenty; the low limit also makes it useless for finding out
 	// which numbers are members.
@@ -97,6 +108,12 @@ func main() {
 	mux.Handle("POST /api/v1/initiate/paystack/push-stk", bookLimit.ByIP(hops, http.HandlerFunc(bookingHandler.InitiateBooking)))
 	mux.Handle("POST /api/v1/camp/register", campLimit.ByIP(hops, http.HandlerFunc(campHandler.Register)))
 	mux.Handle("GET /api/v1/admin/camp/registrations", adminLimit.ByIP(hops, campHandler.AdminOnly(campHandler.ListAdmin)))
+	mux.Handle("GET /api/v1/tournament", readLimit.ByIP(hops, http.HandlerFunc(registrationHandler.TournamentInfo)))
+	mux.Handle("POST /api/v1/tournament/register", registerLimit.ByIP(hops, http.HandlerFunc(registrationHandler.RegisterTournament)))
+	mux.Handle("GET /api/v1/academy", readLimit.ByIP(hops, http.HandlerFunc(registrationHandler.AcademyInfo)))
+	mux.Handle("POST /api/v1/academy/register", registerLimit.ByIP(hops, http.HandlerFunc(registrationHandler.RegisterAcademy)))
+	mux.Handle("GET /api/v1/admin/tournament/registrations", adminLimit.ByIP(hops, registrationHandler.AdminOnly(registrationHandler.ListTournamentAdmin)))
+	mux.Handle("GET /api/v1/admin/academy/registrations", adminLimit.ByIP(hops, registrationHandler.AdminOnly(registrationHandler.ListAcademyAdmin)))
 	// Authenticated by Paystack's HMAC signature, so it is not IP-limited:
 	// legitimate retries must never be throttled.
 	mux.HandleFunc("POST /api/v1/webhook/paystack", bookingHandler.PaystackWebhook)

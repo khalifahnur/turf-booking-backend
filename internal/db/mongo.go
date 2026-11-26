@@ -145,3 +145,33 @@ func blockIndexModels() []mongo.IndexModel {
 		},
 	}
 }
+
+// EnsureRegistrationIndexes keeps payment references unique (one payment can
+// settle only one registration) and the admin list fast. As with the other
+// indexes, a failure is logged rather than fatal.
+func EnsureRegistrationIndexes(collection *mongo.Collection) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := collection.Indexes().CreateMany(ctx, registrationIndexModels())
+	if err != nil {
+		log.Printf("[DB] could not ensure registration indexes: %v", err)
+	}
+}
+
+func registrationIndexModels() []mongo.IndexModel {
+	return []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "payment.reference", Value: 1}},
+			Options: options.Index().SetUnique(true).SetName("uniq_registration_reference"),
+		},
+		{
+			Keys: bson.D{
+				{Key: "kind", Value: 1},
+				{Key: "status", Value: 1},
+				{Key: "createdAt", Value: -1},
+			},
+			Options: options.Index().SetName("kind_status_created"),
+		},
+	}
+}

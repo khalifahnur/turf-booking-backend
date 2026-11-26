@@ -11,6 +11,7 @@ import (
 
 	"turf-booking-backend/internal/config"
 	"turf-booking-backend/internal/models"
+	"turf-booking-backend/internal/registration"
 	"turf-booking-backend/internal/schedule"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -23,7 +24,7 @@ import (
 // MongoDB stores send (occupancyFilter, memberSessionsFilter) against the
 // bookings as BSON documents. A misspelt field name or a wrong operator in a
 // filter therefore fails these tests instead of silently matching nothing.
-// It understands only what those filters use: equality, $gte, $lt and $in.
+// It understands only what those filters use: equality, $ne, $gte, $lt, $in and $or.
 
 func docOf(v any) bson.M {
 	raw, err := bson.Marshal(v)
@@ -62,6 +63,15 @@ func field(doc bson.M, path string) (any, bool) {
 
 func inList(list any, got any) bool {
 	rv := reflect.ValueOf(list)
+	// A field that holds an array matches $in when any of its elements is listed.
+	if arr, ok := got.(primitive.A); ok {
+		for _, el := range arr {
+			if inList(list, el) {
+				return true
+			}
+		}
+		return false
+	}
 	for i := 0; i < rv.Len(); i++ {
 		if reflect.DeepEqual(rv.Index(i).Interface(), got) {
 			return true
@@ -70,8 +80,33 @@ func inList(list any, got any) bool {
 	return false
 }
 
+// asTime reads a stored date (the driver gives back primitive.DateTime) or a
+// filter's time.Time.
+func asTime(v any) (time.Time, bool) {
+	switch x := v.(type) {
+	case time.Time:
+		return x, true
+	case primitive.DateTime:
+		return x.Time(), true
+	}
+	return time.Time{}, false
+}
+
 func matches(doc, filter bson.M) bool {
 	for path, want := range filter {
+		if path == "$or" {
+			any := false
+			for _, clause := range want.(bson.A) {
+				if matches(doc, clause.(bson.M)) {
+					any = true
+					break
+				}
+			}
+			if !any {
+				return false
+			}
+			continue
+		}
 		got, present := field(doc, path)
 		ops, isOps := want.(bson.M)
 		if !isOps {
@@ -81,6 +116,12 @@ func matches(doc, filter bson.M) bool {
 			continue
 		}
 		for op, arg := range ops {
+			if op == "$ne" {
+				if present && reflect.DeepEqual(got, arg) {
+					return false
+				}
+				continue
+			}
 			if !present {
 				return false
 			}
@@ -90,10 +131,20 @@ func matches(doc, filter bson.M) bool {
 					return false
 				}
 			case "$gte", "$lt":
+				if gt, ok := asTime(got); ok {
+					at, ok2 := asTime(arg)
+					if !ok2 {
+						panic(fmt.Sprintf("the test evaluator cannot compare %T with %T", got, arg))
+					}
+					if (op == "$gte" && gt.Before(at)) || (op == "$lt" && !gt.Before(at)) {
+						return false
+					}
+					continue
+				}
 				g, ok1 := got.(string)
 				a, ok2 := arg.(string)
 				if !ok1 || !ok2 {
-					panic(fmt.Sprintf("the test evaluator compares strings only: %T %T", got, arg))
+					panic(fmt.Sprintf("the test evaluator compares strings and dates only: %T %T", got, arg))
 				}
 				if (op == "$gte" && g < a) || (op == "$lt" && g >= a) {
 					return false
@@ -363,6 +414,148 @@ func (f *fakeBlocks) RemoveSeries(_ context.Context, seriesID, fromDate string) 
 	}
 	f.rows = kept
 	return n, nil
+}
+
+// ---- in-memory registrations --------------------------------------------------
+
+type fakeRegistrations struct {
+	mu       sync.Mutex
+	rows     []models.Registration
+	failures map[string]error
+}
+
+func (f *fakeRegistrations) all() []models.Registration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]models.Registration(nil), f.rows...)
+}
+
+func (f *fakeRegistrations) pick(filter bson.M) []models.Registration {
+	var hit []models.Registration
+	for _, r := range f.rows {
+		if matches(docOf(r), filter) {
+			hit = append(hit, r)
+		}
+	}
+	return hit
+}
+
+func (f *fakeRegistrations) Insert(_ context.Context, reg models.Registration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["Insert"]; err != nil {
+		return err
+	}
+	f.rows = append(f.rows, reg)
+	return nil
+}
+
+func (f *fakeRegistrations) TournamentSlots(_ context.Context, pendingAfter time.Time, excluding primitive.ObjectID) (map[string]registration.Slots, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["TournamentSlots"]; err != nil {
+		return nil, err
+	}
+	return countSlots(f.pick(tournamentSlotsFilter(pendingAfter, excluding))), nil
+}
+
+func (f *fakeRegistrations) TeamHolds(_ context.Context, teamKey string, wanted []string, pendingAfter time.Time) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["TeamHolds"]; err != nil {
+		return nil, err
+	}
+	return held(wanted, f.pick(teamHoldsFilter(teamKey, wanted, pendingAfter))), nil
+}
+
+func (f *fakeRegistrations) PlayerHolds(_ context.Context, playerKey, phone string, pendingAfter time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["PlayerHolds"]; err != nil {
+		return false, err
+	}
+	return len(f.pick(playerHoldsFilter(playerKey, phone, pendingAfter))) > 0, nil
+}
+
+func (f *fakeRegistrations) MarkPaid(_ context.Context, reference string, paidCents int64, now time.Time) (*models.Registration, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["MarkPaid"]; err != nil {
+		return nil, err
+	}
+	// The evaluator cannot run the $expr that compares the amount, so that part of
+	// the filter is applied by hand (its shape is checked in the query tests).
+	filter := registrationPaidFilter(reference, paidCents)
+	delete(filter, "$expr")
+	for i := range f.rows {
+		r := &f.rows[i]
+		if !matches(docOf(*r), filter) {
+			continue
+		}
+		if paidCents > 0 && paidCents < int64(r.AmountKES)*100 {
+			return nil, nil
+		}
+		r.Status = registration.StatusPaid
+		r.Payment.PaidAmountCents = paidCents
+		r.Payment.PaidAt = &now
+		r.UpdatedAt = now
+		out := *r
+		return &out, nil
+	}
+	return nil, nil
+}
+
+func (f *fakeRegistrations) MarkFailed(_ context.Context, reference string, now time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["MarkFailed"]; err != nil {
+		return false, err
+	}
+	for i := range f.rows {
+		if matches(docOf(f.rows[i]), registrationFailedFilter(reference)) {
+			f.rows[i].Status = registration.StatusFailed
+			f.rows[i].UpdatedAt = now
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeRegistrations) Status(_ context.Context, reference string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["Status"]; err != nil {
+		return "", err
+	}
+	if hit := f.pick(registrationReferenceFilter(reference)); len(hit) > 0 {
+		return hit[0].Status, nil
+	}
+	return "", errUnknownReference
+}
+
+func (f *fakeRegistrations) FlagOverflow(_ context.Context, id primitive.ObjectID, categories []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["FlagOverflow"]; err != nil {
+		return err
+	}
+	for i := range f.rows {
+		if matches(docOf(f.rows[i]), registrationIDFilter(id)) {
+			f.rows[i].Overflow = categories
+		}
+	}
+	return nil
+}
+
+func (f *fakeRegistrations) ListForAdmin(_ context.Context, kind string) ([]models.Registration, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failures["ListForAdmin"]; err != nil {
+		return nil, err
+	}
+	out := f.pick(registrationAdminFilter(kind))
+	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
 }
 
 // ---- the payment gateway ------------------------------------------------------

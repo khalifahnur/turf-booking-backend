@@ -162,12 +162,12 @@ func (h *RegistrationHandler) TournamentInfo(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	body, err := json.Marshal(map[string]any{
-		"fee":          registration.TournamentFeeKES,
-		"minPlayers":   registration.MinPlayers,
-		"maxPlayers":   registration.MaxPlayers,
-		"rulesVersion": registration.RulesVersion,
-		"holdMinutes":  int(registration.HoldWindow / time.Minute),
-		"categories":   slotViews(slots),
+		"feePerCategory": registration.TournamentFeePerCategoryKES,
+		"minPlayers":     registration.MinPlayers,
+		"maxPlayers":     registration.MaxPlayers,
+		"rulesVersion":   registration.RulesVersion,
+		"holdMinutes":    int(registration.HoldWindow / time.Minute),
+		"categories":     slotViews(slots),
 	})
 	if err != nil {
 		http.Error(w, "Failed to load the tournament", http.StatusInternalServerError)
@@ -686,10 +686,10 @@ func (h *RegistrationHandler) ListTournamentAdmin(w http.ResponseWriter, r *http
 		})
 	}
 	body, err := json.Marshal(map[string]any{
-		"fee":           registration.TournamentFeeKES,
-		"holdMinutes":   int(registration.HoldWindow / time.Minute),
-		"categories":    slotViews(slots),
-		"registrations": views,
+		"feePerCategory": registration.TournamentFeePerCategoryKES,
+		"holdMinutes":    int(registration.HoldWindow / time.Minute),
+		"categories":     slotViews(slots),
+		"registrations":  views,
 	})
 	if err != nil {
 		http.Error(w, "Failed to load registrations", http.StatusInternalServerError)

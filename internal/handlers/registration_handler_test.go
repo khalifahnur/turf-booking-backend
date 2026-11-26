@@ -163,12 +163,12 @@ func (f *regFlow) status(t *testing.T, reference string) string {
 }
 
 type infoJSON struct {
-	Fee          int        `json:"fee"`
-	MinPlayers   int        `json:"minPlayers"`
-	MaxPlayers   int        `json:"maxPlayers"`
-	RulesVersion string     `json:"rulesVersion"`
-	HoldMinutes  int        `json:"holdMinutes"`
-	Categories   []slotView `json:"categories"`
+	FeePerCategory int        `json:"feePerCategory"`
+	MinPlayers     int        `json:"minPlayers"`
+	MaxPlayers     int        `json:"maxPlayers"`
+	RulesVersion   string     `json:"rulesVersion"`
+	HoldMinutes    int        `json:"holdMinutes"`
+	Categories     []slotView `json:"categories"`
 }
 
 func (f *regFlow) info(t *testing.T) infoJSON {
@@ -198,23 +198,23 @@ func (f *regFlow) slot(t *testing.T, id string) slotView {
 
 // ---- the tournament ---------------------------------------------------------------------
 
-func TestATournamentRegistrationChargesTheFeeOnceAndHoldsAPlace(t *testing.T) {
+func TestATournamentRegistrationChargesTheFeeForEachCategoryAndHoldsAPlaceInEach(t *testing.T) {
 	f := newRegFlow()
 	rec, out := f.team(body{"academyName": "  kibera   Stars ", "categories": []string{"u15", "u10"}})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("register = %d %q", rec.Code, rec.Body.String())
 	}
-	if out.Total != 2_000 || !strings.HasPrefix(out.Reference, "tourney-") || len(out.Reference) != len("tourney-")+32 || out.Message != "Awaiting Payment" {
-		t.Errorf("response = %+v, want Ksh 2,000 and a tourney- reference", out)
+	if out.Total != 4_000 || !strings.HasPrefix(out.Reference, "tourney-") || len(out.Reference) != len("tourney-")+32 || out.Message != "Awaiting Payment" {
+		t.Errorf("response = %+v, want Ksh 4,000 and a tourney- reference", out)
 	}
 	if !reflect.DeepEqual(out.Categories, []string{"u10", "u15"}) {
 		t.Errorf("categories = %v, want them in order", out.Categories)
 	}
 
 	calls := f.gateway.all()
-	if len(calls) != 1 || calls[0].cents != 200_000 || calls[0].phone != phoneN(1) || calls[0].ref != out.Reference ||
+	if len(calls) != 1 || calls[0].cents != 400_000 || calls[0].phone != phoneN(1) || calls[0].ref != out.Reference ||
 		calls[0].email != registration.PayerEmail(phoneN(1)) {
-		t.Fatalf("payment requests = %+v, want one of Ksh 2,000 to the team's number", calls)
+		t.Fatalf("payment requests = %+v, want one of Ksh 4,000 (2,000 for each of two categories) to the team's number", calls)
 	}
 
 	rows := f.store.all()
@@ -223,7 +223,7 @@ func TestATournamentRegistrationChargesTheFeeOnceAndHoldsAPlace(t *testing.T) {
 	}
 	r := rows[0]
 	if r.Kind != "tournament" || r.TeamName != "kibera Stars" || r.TeamKey != "kibera stars" || r.Players != 14 || r.PhoneNumber != phoneN(1) ||
-		!reflect.DeepEqual(r.Categories, []string{"u10", "u15"}) || r.AmountKES != 2_000 || r.Status != "Pending" ||
+		!reflect.DeepEqual(r.Categories, []string{"u10", "u15"}) || r.AmountKES != 4_000 || r.Status != "Pending" ||
 		r.RulesVersion != registration.RulesVersion || !r.RulesAcceptedAt.Equal(flowNow) || r.Payment.Reference != out.Reference {
 		t.Errorf("stored = %+v", r)
 	}
@@ -561,16 +561,16 @@ func TestPayingSettlesTheRegistrationAndTextsTheTeam(t *testing.T) {
 	f := newRegFlow()
 	out := f.mustTeam(t, body{"categories": []string{"u10", "u15"}})
 
-	if rec := f.pay(out.Reference, 200_000); rec.Code != http.StatusOK {
+	if rec := f.pay(out.Reference, 400_000); rec.Code != http.StatusOK {
 		t.Fatalf("webhook = %d", rec.Code)
 	}
 	r := f.store.all()[0]
-	if r.Status != "Paid" || r.Payment.PaidAt == nil || r.Payment.PaidAmountCents != 200_000 || len(r.Overflow) != 0 {
+	if r.Status != "Paid" || r.Payment.PaidAt == nil || r.Payment.PaidAmountCents != 400_000 || len(r.Overflow) != 0 {
 		t.Errorf("settled = %+v", r)
 	}
 	select {
 	case sent := <-f.texts:
-		if sent.TeamName != "Kibera Stars" || sent.PhoneNumber != phoneN(1) || sent.AmountKES != 2_000 {
+		if sent.TeamName != "Kibera Stars" || sent.PhoneNumber != phoneN(1) || sent.AmountKES != 4_000 {
 			t.Errorf("text for %+v", sent)
 		}
 	case <-time.After(2 * time.Second):
@@ -581,7 +581,7 @@ func TestPayingSettlesTheRegistrationAndTextsTheTeam(t *testing.T) {
 	}
 
 	// Paystack repeats webhooks. The repeat changes nothing and texts nobody again.
-	if rec := f.pay(out.Reference, 200_000); rec.Code != http.StatusOK {
+	if rec := f.pay(out.Reference, 400_000); rec.Code != http.StatusOK {
 		t.Errorf("repeat webhook = %d", rec.Code)
 	}
 	select {
@@ -606,6 +606,39 @@ func TestAPaymentBelowTheFeeDoesNotSettle(t *testing.T) {
 	// An amount Paystack did not send is accepted: refusing a confirmed payment is worse.
 	if rec := f.pay(out.Reference, 0); rec.Code != http.StatusOK || f.status(t, out.Reference) != "Paid" {
 		t.Errorf("unknown amount: %d %s", rec.Code, f.status(t, out.Reference))
+	}
+}
+
+// Paying for one category does not settle a registration for two: the fee is
+// 2,000 for each, and the check against it is made in the update itself.
+func TestAPaymentForOneCategoryDoesNotSettleARegistrationForTwo(t *testing.T) {
+	f := newRegFlow()
+	out := f.mustTeam(t, body{"categories": []string{"u10", "adults"}})
+	if out.Total != 4_000 {
+		t.Fatalf("total = %d, want Ksh 4,000", out.Total)
+	}
+	f.pay(out.Reference, 200_000)
+	if got := f.status(t, out.Reference); got != "Pending" {
+		t.Errorf("status = %s; Ksh 2,000 is not the Ksh 4,000 fee for two categories", got)
+	}
+	f.pay(out.Reference, 400_000)
+	if got := f.status(t, out.Reference); got != "Paid" {
+		t.Errorf("status = %s after the full Ksh 4,000", got)
+	}
+}
+
+// Each category is priced on its own: the Adults alone cost 2,000, all three 6,000.
+func TestTheFeeFollowsTheNumberOfCategories(t *testing.T) {
+	for _, c := range []struct {
+		cats  []string
+		total int
+	}{{[]string{"adults"}, 2_000}, {[]string{"u15"}, 2_000}, {[]string{"u10", "u15"}, 4_000}, {[]string{"u10", "u15", "adults"}, 6_000}} {
+		f := newRegFlow()
+		out := f.mustTeam(t, body{"categories": c.cats})
+		calls := f.gateway.all()
+		if out.Total != c.total || len(calls) != 1 || calls[0].cents != c.total*100 {
+			t.Errorf("%v: total %d, prompts %+v, want Ksh %d", c.cats, out.Total, calls, c.total)
+		}
 	}
 }
 
@@ -921,7 +954,7 @@ func TestThePublicTournamentInfoStatesTheRulesOfTheFormAndNamesNobody(t *testing
 		t.Errorf("the public info leaked a team: %s", rec.Body.String())
 	}
 	info := f.info(t)
-	if info.Fee != 2_000 || info.MinPlayers != 5 || info.MaxPlayers != 40 || info.RulesVersion != registration.RulesVersion || info.HoldMinutes != 3 {
+	if info.FeePerCategory != 2_000 || info.MinPlayers != 5 || info.MaxPlayers != 40 || info.RulesVersion != registration.RulesVersion || info.HoldMinutes != 3 {
 		t.Errorf("info = %+v", info)
 	}
 	if len(info.Categories) != 3 || info.Categories[0].ID != "u10" || info.Categories[0].Label != "U10" || info.Categories[1].ID != "u15" || info.Categories[2].ID != "adults" {
@@ -969,7 +1002,7 @@ func (f *regFlow) adminTournament(t *testing.T) (int, []slotView, []tournamentRe
 		t.Fatalf("admin tournament = %d %s", rec.Code, rec.Body.String())
 	}
 	var out struct {
-		Fee           int                          `json:"fee"`
+		Fee           int                          `json:"feePerCategory"`
 		Categories    []slotView                   `json:"categories"`
 		Registrations []tournamentRegistrationView `json:"registrations"`
 	}
@@ -1004,7 +1037,7 @@ func TestTheAdminSeesEveryTournamentRegistrationAndTheSlotsTaken(t *testing.T) {
 		!reflect.DeepEqual(v.Categories, []string{"u10"}) || v.Overflow == nil || v.ID == "" || v.RulesVersion != registration.RulesVersion {
 		t.Errorf("Team A = %+v", v)
 	}
-	if v := byName["Team B"]; v.Status != "Pending" || v.PaidAt != nil || !reflect.DeepEqual(v.Categories, []string{"u10", "u15"}) || v.Players != 20 {
+	if v := byName["Team B"]; v.Status != "Pending" || v.PaidAt != nil || !reflect.DeepEqual(v.Categories, []string{"u10", "u15"}) || v.Players != 20 || v.AmountKES != 4_000 {
 		t.Errorf("Team B = %+v", v)
 	}
 	if len(slots) != 3 || slots[0].Paid != 1 || slots[0].Held != 1 || slots[0].Left != 1 || slots[0].Reserved != 1 || slots[1].Held != 1 || slots[1].Left != 2 || slots[2].Left != 6 {

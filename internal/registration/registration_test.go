@@ -12,8 +12,8 @@ import (
 
 func TestFeesAndPlacesAreWhatTheAcademyAnnounced(t *testing.T) {
 	// If any of these change, the rules page and the SMS wording must change too.
-	if TournamentFeeKES != 2_000 || AcademyFeeKES != 5_000 {
-		t.Errorf("fees %d/%d", TournamentFeeKES, AcademyFeeKES)
+	if TournamentFeePerCategoryKES != 2_000 || AcademyFeeKES != 5_000 {
+		t.Errorf("fees %d/%d", TournamentFeePerCategoryKES, AcademyFeeKES)
 	}
 	type shape struct {
 		id, group      string
@@ -48,15 +48,16 @@ func TestNewEntry(t *testing.T) {
 		{"youth and adults", []string{"adults", "u10"}, []string{"u10", "adults"}},
 		{"adults only", []string{"adults"}, []string{"adults"}},
 		{"repeats collapse to one place", []string{"u10", "u10", "u15", "u10"}, []string{"u10", "u15"}},
+		{"all three", []string{"adults", "u15", "u10"}, []string{"u10", "u15", "adults"}},
 	}
 	for _, c := range cases {
 		got, err := NewEntry(c.in)
 		if err != nil || !reflect.DeepEqual(got.Categories, c.want) {
 			t.Errorf("%s: NewEntry(%v) = %v, %v; want %v", c.name, c.in, got.Categories, err, c.want)
 		}
-		// One registration is one fee, whatever number of categories it covers.
-		if err == nil && got.FeeKES != 2_000 {
-			t.Errorf("%s: fee = %d, want Ksh 2,000 for the registration", c.name, got.FeeKES)
+		// Ksh 2,000 for each category the registration covers, and a repeated one is not charged twice.
+		if err == nil && got.FeeKES != 2_000*len(c.want) {
+			t.Errorf("%s: fee = %d, want Ksh %d (2,000 for each of %d categories)", c.name, got.FeeKES, 2_000*len(c.want), len(c.want))
 		}
 	}
 	for name, in := range map[string][]string{"none": nil, "empty": {}, "unknown": {"u12"}, "singular": {"adult"}, "one good one bad": {"u10", "senior"}, "wrong case": {"U10"}} {

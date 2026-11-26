@@ -32,12 +32,10 @@ const (
 
 // Fees, in whole shillings.
 const (
-	// TournamentFeeKES is charged once per tournament registration. A team that
-	// enters both categories pays it once, not twice; to charge per category
-	// instead, change TournamentFeeKES to return TournamentFeePerCategoryKES * the
-	// number of categories (the tests name the rule).
-	TournamentFeeKES = 2_000
-	AcademyFeeKES    = 5_000
+	// TournamentFeePerCategoryKES is charged for each category a team enters, so a
+	// registration for U10 and U15 costs twice this and one for the Adults once.
+	TournamentFeePerCategoryKES = 2_000
+	AcademyFeeKES               = 5_000
 )
 
 const (
@@ -51,7 +49,7 @@ const (
 	// one, so a stale browser tab cannot record agreement to wording that has
 	// since changed. Bump it together with the rules in the frontend
 	// (lib/tournament.ts) whenever they change.
-	RulesVersion = "tournament-2026-v2"
+	RulesVersion = "tournament-2026-v3"
 )
 
 // Statuses stored on a registration.
@@ -134,7 +132,7 @@ func NewEntry(ids []string) (Entry, error) {
 			out = append(out, c.ID)
 		}
 	}
-	return Entry{Categories: out, FeeKES: TournamentFeeKES}, nil
+	return Entry{Categories: out, FeeKES: TournamentFeePerCategoryKES * len(out)}, nil
 }
 
 // ValidatePlayers checks the squad size a team stated.

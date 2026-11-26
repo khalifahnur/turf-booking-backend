@@ -247,12 +247,13 @@ func TestTheFeeIsNotSomethingTheBrowserCanChoose(t *testing.T) {
 }
 
 // Youth: 4 teams in each of U10 and U15, one place in each already taken by
-// St. Sebastian Sports Academy, so 3 are open. Adults: 6.
-func TestFirstComeFirstSlotTheYouthCategoriesTakeThreeMoreTeamsAndTheAdultsSix(t *testing.T) {
+// St. Sebastian Sports Academy, so 3 are open. Adults: 6, one of them booked
+// directly, so 5 are open.
+func TestFirstComeFirstSlotTheYouthCategoriesTakeThreeMoreTeamsAndTheAdultsFive(t *testing.T) {
 	for _, c := range []struct {
 		id, label string
 		open      int
-	}{{"u10", "U10", 3}, {"u15", "U15", 3}, {"adults", "Adults", 6}} {
+	}{{"u10", "U10", 3}, {"u15", "U15", 3}, {"adults", "Adults", 5}} {
 		f := newRegFlow()
 		for i := 1; i <= c.open; i++ {
 			f.mustTeam(t, body{"academyName": fmt.Sprintf("Team %d", i), "phoneNumber": phoneN(i), "categories": []string{c.id}})
@@ -283,13 +284,13 @@ func TestFirstComeFirstSlotTheYouthCategoriesTakeThreeMoreTeamsAndTheAdultsSix(t
 	}
 }
 
-func TestTheAcademysOwnPlacesAreShownAsTakenButAreNotAnyTeamsRegistration(t *testing.T) {
+func TestPlacesTakenDirectlyAreShownAsTakenButAreNotAnyTeamsRegistration(t *testing.T) {
 	f := newRegFlow()
 	info := f.info(t)
 	want := map[string]slotView{
 		"u10":    {ID: "u10", Label: "U10", Group: "youth", Capacity: 4, Reserved: 1, Left: 3},
 		"u15":    {ID: "u15", Label: "U15", Group: "youth", Capacity: 4, Reserved: 1, Left: 3},
-		"adults": {ID: "adults", Label: "Adults", Group: "adults", Capacity: 6, Reserved: 0, Left: 6},
+		"adults": {ID: "adults", Label: "Adults", Group: "adults", Capacity: 6, Reserved: 1, Left: 5},
 	}
 	if len(info.Categories) != 3 {
 		t.Fatalf("categories = %+v", info.Categories)
@@ -300,7 +301,7 @@ func TestTheAcademysOwnPlacesAreShownAsTakenButAreNotAnyTeamsRegistration(t *tes
 		}
 	}
 	if len(f.store.all()) != 0 {
-		t.Error("the academy's places must not need a registration row")
+		t.Error("places taken directly must not need a registration row")
 	}
 }
 
@@ -310,7 +311,7 @@ func TestATeamInAllCategoriesTakesAPlaceInEach(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		f.mustTeam(t, body{"academyName": fmt.Sprintf("Everything %d", i), "phoneNumber": phoneN(i), "categories": all})
 	}
-	for id, left := range map[string]int{"u10": 0, "u15": 0, "adults": 3} {
+	for id, left := range map[string]int{"u10": 0, "u15": 0, "adults": 2} {
 		if s := f.slot(t, id); s.Left != left {
 			t.Errorf("%s = %+v, want %d left", id, s, left)
 		}
@@ -738,7 +739,7 @@ func TestAPaymentThatArrivesAfterItsPlaceWasGivenAwayIsFlaggedForARefund(t *test
 }
 
 func TestTheLastPayingTeamOfACategoryIsNotFlagged(t *testing.T) {
-	for id, open := range map[string]int{"u10": 3, "u15": 3, "adults": 6} {
+	for id, open := range map[string]int{"u10": 3, "u15": 3, "adults": 5} {
 		f := newRegFlow()
 		var refs []string
 		for i := 1; i <= open; i++ {
@@ -960,7 +961,7 @@ func TestThePublicTournamentInfoStatesTheRulesOfTheFormAndNamesNobody(t *testing
 	if len(info.Categories) != 3 || info.Categories[0].ID != "u10" || info.Categories[0].Label != "U10" || info.Categories[1].ID != "u15" || info.Categories[2].ID != "adults" {
 		t.Errorf("categories = %+v, want U10, U15 then Adults", info.Categories)
 	}
-	if info.Categories[0].Held != 1 || info.Categories[0].Left != 2 || info.Categories[1].Left != 3 || info.Categories[2].Left != 6 {
+	if info.Categories[0].Held != 1 || info.Categories[0].Left != 2 || info.Categories[1].Left != 3 || info.Categories[2].Left != 5 {
 		t.Errorf("slots = %+v", info.Categories)
 	}
 
@@ -1040,7 +1041,7 @@ func TestTheAdminSeesEveryTournamentRegistrationAndTheSlotsTaken(t *testing.T) {
 	if v := byName["Team B"]; v.Status != "Pending" || v.PaidAt != nil || !reflect.DeepEqual(v.Categories, []string{"u10", "u15"}) || v.Players != 20 || v.AmountKES != 4_000 {
 		t.Errorf("Team B = %+v", v)
 	}
-	if len(slots) != 3 || slots[0].Paid != 1 || slots[0].Held != 1 || slots[0].Left != 1 || slots[0].Reserved != 1 || slots[1].Held != 1 || slots[1].Left != 2 || slots[2].Left != 6 {
+	if len(slots) != 3 || slots[0].Paid != 1 || slots[0].Held != 1 || slots[0].Left != 1 || slots[0].Reserved != 1 || slots[1].Held != 1 || slots[1].Left != 2 || slots[2].Left != 5 || slots[2].Reserved != 1 {
 		t.Errorf("slots = %+v", slots)
 	}
 }

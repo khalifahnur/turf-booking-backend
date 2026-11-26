@@ -49,7 +49,7 @@ const (
 	// one, so a stale browser tab cannot record agreement to wording that has
 	// since changed. Bump it together with the rules in the frontend
 	// (lib/tournament.ts) whenever they change.
-	RulesVersion = "tournament-2026-v3"
+	RulesVersion = "tournament-2026-v4"
 )
 
 // Statuses stored on a registration.
@@ -73,8 +73,10 @@ const HoldWindow = 3 * time.Minute
 
 // Category is a division of the tournament. Places in it go to whoever
 // registers first. Capacity is how many teams it takes in all; Reserved is how
-// many of those places are already taken by the academy's own teams, which are
-// not sold on the website, so only Capacity - Reserved are open to everyone else.
+// many of those places are already taken by teams registered directly with the
+// organisers (the academy's own teams, and teams booked outside the website).
+// They are not sold on the website, so only Capacity - Reserved are open to
+// everyone else. To reserve another place, raise Reserved here.
 type Category struct {
 	ID       string
 	Label    string
@@ -87,11 +89,12 @@ type Category struct {
 func (c Category) Open() int { return max(0, c.Capacity-c.Reserved) }
 
 // The youth tournament takes 4 teams in each of U10 and U15 (St. Sebastian
-// Sports Academy has one place in each already), and the adults take 6.
+// Sports Academy has one place in each already), and the adults take 6 (one
+// team has booked directly, outside the website, so 5 are open).
 var categories = []Category{
 	{ID: "u10", Label: "U10", Group: "youth", Capacity: 4, Reserved: 1},
 	{ID: "u15", Label: "U15", Group: "youth", Capacity: 4, Reserved: 1},
-	{ID: "adults", Label: "Adults", Group: "adults", Capacity: 6, Reserved: 0},
+	{ID: "adults", Label: "Adults", Group: "adults", Capacity: 6, Reserved: 1},
 }
 
 // Categories lists the age groups in the order they are shown.

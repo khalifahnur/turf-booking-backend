@@ -24,16 +24,17 @@ func TestFeesAndPlacesAreWhatTheAcademyAnnounced(t *testing.T) {
 		got = append(got, shape{c.ID, c.Group, c.Capacity, c.Open()})
 	}
 	// Youth: 4 teams in each of U10 and U15, one place in each already taken by
-	// St. Sebastian Sports Academy, so 3 are open. Adults: 6 teams.
-	want := []shape{{"u10", "youth", 4, 3}, {"u15", "youth", 4, 3}, {"adults", "adults", 6, 6}}
+	// St. Sebastian Sports Academy, so 3 are open. Adults: 6 teams, one of which
+	// has booked directly, so 5 are open.
+	want := []shape{{"u10", "youth", 4, 3}, {"u15", "youth", 4, 3}, {"adults", "adults", 6, 5}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("categories = %+v, want %+v", got, want)
 	}
 	if u10, _ := LookupCategory("u10"); u10.Reserved != 1 {
 		t.Errorf("the academy holds one place in U10, got %d", u10.Reserved)
 	}
-	if adults, _ := LookupCategory("adults"); adults.Reserved != 0 {
-		t.Errorf("nothing is reserved in the adults, got %d", adults.Reserved)
+	if adults, _ := LookupCategory("adults"); adults.Reserved != 1 {
+		t.Errorf("one adults team has booked directly, got %d reserved", adults.Reserved)
 	}
 }
 
@@ -86,7 +87,7 @@ func TestPlacesLeft(t *testing.T) {
 	}{
 		{"u10", 0, 0, 3}, {"u10", 1, 1, 1}, {"u10", 2, 0, 1}, {"u10", 2, 1, 0}, {"u10", 3, 0, 0}, {"u10", 5, 5, 0},
 		{"u15", 0, 0, 3}, {"u15", 0, 3, 0},
-		{"adults", 0, 0, 6}, {"adults", 4, 2, 0}, {"adults", 5, 0, 1},
+		{"adults", 0, 0, 5}, {"adults", 3, 2, 0}, {"adults", 4, 0, 1}, {"adults", 5, 1, 0},
 		{"u12", 0, 0, 0}, // not a category: nothing to take
 	} {
 		s := Slots{Paid: c.paid, Held: c.held}
@@ -105,13 +106,14 @@ func TestPlacesLeft(t *testing.T) {
 
 func TestOverCapacity(t *testing.T) {
 	// Three other teams have paid in U10 (all the places the website has), two in
-	// U15 and five in the adults: this payment is one too many only for U10.
-	got := OverCapacity([]string{"u10", "u15", "adults"}, map[string]int{"u10": 3, "u15": 2, "adults": 5})
+	// U15 and four in the adults (one place short of the five it has): this payment
+	// is one too many only for U10.
+	got := OverCapacity([]string{"u10", "u15", "adults"}, map[string]int{"u10": 3, "u15": 2, "adults": 4})
 	if !reflect.DeepEqual(got, []string{"u10"}) {
 		t.Errorf("OverCapacity = %v, want [u10]", got)
 	}
-	if got := OverCapacity([]string{"adults"}, map[string]int{"adults": 6}); !reflect.DeepEqual(got, []string{"adults"}) {
-		t.Errorf("a seventh adult team is over capacity, got %v", got)
+	if got := OverCapacity([]string{"adults"}, map[string]int{"adults": 5}); !reflect.DeepEqual(got, []string{"adults"}) {
+		t.Errorf("a sixth paying adult team is over capacity (one place is taken directly), got %v", got)
 	}
 	if got := OverCapacity([]string{"u10"}, map[string]int{"u10": 2}); len(got) != 0 {
 		t.Errorf("the third paying youth team is within capacity, got %v", got)

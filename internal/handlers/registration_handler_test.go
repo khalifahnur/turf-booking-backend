@@ -163,13 +163,12 @@ func (f *regFlow) status(t *testing.T, reference string) string {
 }
 
 type infoJSON struct {
-	Fee              int        `json:"fee"`
-	TeamsPerCategory int        `json:"teamsPerCategory"`
-	MinPlayers       int        `json:"minPlayers"`
-	MaxPlayers       int        `json:"maxPlayers"`
-	RulesVersion     string     `json:"rulesVersion"`
-	HoldMinutes      int        `json:"holdMinutes"`
-	Categories       []slotView `json:"categories"`
+	Fee          int        `json:"fee"`
+	MinPlayers   int        `json:"minPlayers"`
+	MaxPlayers   int        `json:"maxPlayers"`
+	RulesVersion string     `json:"rulesVersion"`
+	HoldMinutes  int        `json:"holdMinutes"`
+	Categories   []slotView `json:"categories"`
 }
 
 func (f *regFlow) info(t *testing.T) infoJSON {
@@ -230,7 +229,7 @@ func TestATournamentRegistrationChargesTheFeeOnceAndHoldsAPlace(t *testing.T) {
 	}
 	// It holds one place in each category it asked for.
 	for _, id := range []string{"u10", "u15"} {
-		if s := f.slot(t, id); s.Held != 1 || s.Paid != 0 || s.Left != 5 {
+		if s := f.slot(t, id); s.Held != 1 || s.Paid != 0 || s.Left != 2 {
 			t.Errorf("%s = %+v, want one place held", id, s)
 		}
 	}
@@ -247,58 +246,90 @@ func TestTheFeeIsNotSomethingTheBrowserCanChoose(t *testing.T) {
 	}
 }
 
-func TestFirstComeFirstSlotSixTeamsPerCategory(t *testing.T) {
-	f := newRegFlow()
-	for i := 1; i <= 6; i++ {
-		f.mustTeam(t, body{"academyName": fmt.Sprintf("Team %d", i), "phoneNumber": phoneN(i)})
-	}
-	if s := f.slot(t, "u10"); s.Left != 0 || s.Held != 6 || s.Capacity != 6 {
-		t.Fatalf("u10 = %+v, want all six places held", s)
-	}
+// Youth: 4 teams in each of U10 and U15, one place in each already taken by
+// St. Sebastian Sports Academy, so 3 are open. Adults: 6.
+func TestFirstComeFirstSlotTheYouthCategoriesTakeThreeMoreTeamsAndTheAdultsSix(t *testing.T) {
+	for _, c := range []struct {
+		id, label string
+		open      int
+	}{{"u10", "U10", 3}, {"u15", "U15", 3}, {"adults", "Adults", 6}} {
+		f := newRegFlow()
+		for i := 1; i <= c.open; i++ {
+			f.mustTeam(t, body{"academyName": fmt.Sprintf("Team %d", i), "phoneNumber": phoneN(i), "categories": []string{c.id}})
+		}
+		if s := f.slot(t, c.id); s.Left != 0 || s.Held != c.open {
+			t.Fatalf("%s = %+v, want every open place held", c.id, s)
+		}
 
-	// The seventh team is turned away, told why, and is not sent a prompt.
-	before := len(f.gateway.all())
-	rec, _ := f.team(body{"academyName": "Team 7", "phoneNumber": phoneN(7)})
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "U10 is full: all 6 teams have registered") {
-		t.Errorf("seventh team = %d %q, want 409 U10 is full", rec.Code, rec.Body.String())
-	}
-	if rec.Header().Get(middleware.UserMessageHeader) != "1" {
-		t.Error("the refusal is for the team to read, so it must be marked")
-	}
-	if !strings.Contains(rec.Body.String(), "still paying") {
-		t.Errorf("places are held by teams that have not paid yet, and the message should say they may be released: %q", rec.Body.String())
-	}
-	if len(f.gateway.all()) != before || len(f.store.all()) != 6 {
-		t.Error("a team turned away must not be charged or recorded")
-	}
+		// The next team is turned away, told why, and is not sent a prompt.
+		before := len(f.gateway.all())
+		rec, _ := f.team(body{"academyName": "One More", "phoneNumber": phoneN(20), "categories": []string{c.id}})
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), c.label+" is full: all its places are taken") {
+			t.Errorf("%s: team %d = %d %q, want 409 %s is full", c.id, c.open+1, rec.Code, rec.Body.String(), c.label)
+		}
+		if rec.Header().Get(middleware.UserMessageHeader) != "1" {
+			t.Error("the refusal is for the team to read, so it must be marked")
+		}
+		if !strings.Contains(rec.Body.String(), "still paying") {
+			t.Errorf("places are held by teams that have not paid yet, and the message should say they may be released: %q", rec.Body.String())
+		}
+		if len(f.gateway.all()) != before || len(f.store.all()) != c.open {
+			t.Error("a team turned away must not be charged or recorded")
+		}
 
-	// The other category is a separate six.
-	f.mustTeam(t, body{"academyName": "Team 7", "phoneNumber": phoneN(7), "categories": []string{"u15"}})
-	if s := f.slot(t, "u15"); s.Left != 5 {
-		t.Errorf("u15 = %+v", s)
+		// The other categories are separate.
+		other := map[string]string{"u10": "adults", "u15": "adults", "adults": "u10"}[c.id]
+		f.mustTeam(t, body{"academyName": "Elsewhere", "phoneNumber": phoneN(21), "categories": []string{other}})
 	}
 }
 
-func TestATeamInBothCategoriesTakesAPlaceInEach(t *testing.T) {
+func TestTheAcademysOwnPlacesAreShownAsTakenButAreNotAnyTeamsRegistration(t *testing.T) {
 	f := newRegFlow()
-	both := body{"categories": []string{"u10", "u15"}}
-	for i := 1; i <= 6; i++ {
-		f.mustTeam(t, body{"academyName": fmt.Sprintf("Both %d", i), "phoneNumber": phoneN(i), "categories": both["categories"]})
+	info := f.info(t)
+	want := map[string]slotView{
+		"u10":    {ID: "u10", Label: "U10", Group: "youth", Capacity: 4, Reserved: 1, Left: 3},
+		"u15":    {ID: "u15", Label: "U15", Group: "youth", Capacity: 4, Reserved: 1, Left: 3},
+		"adults": {ID: "adults", Label: "Adults", Group: "adults", Capacity: 6, Reserved: 0, Left: 6},
 	}
-	for _, id := range []string{"u10", "u15"} {
-		if s := f.slot(t, id); s.Left != 0 {
-			t.Errorf("%s = %+v, want full after six teams in both", id, s)
+	if len(info.Categories) != 3 {
+		t.Fatalf("categories = %+v", info.Categories)
+	}
+	for _, got := range info.Categories {
+		if !reflect.DeepEqual(got, want[got.ID]) {
+			t.Errorf("%s = %+v, want %+v", got.ID, got, want[got.ID])
+		}
+	}
+	if len(f.store.all()) != 0 {
+		t.Error("the academy's places must not need a registration row")
+	}
+}
+
+func TestATeamInAllCategoriesTakesAPlaceInEach(t *testing.T) {
+	f := newRegFlow()
+	all := []string{"u10", "u15", "adults"}
+	for i := 1; i <= 3; i++ {
+		f.mustTeam(t, body{"academyName": fmt.Sprintf("Everything %d", i), "phoneNumber": phoneN(i), "categories": all})
+	}
+	for id, left := range map[string]int{"u10": 0, "u15": 0, "adults": 3} {
+		if s := f.slot(t, id); s.Left != left {
+			t.Errorf("%s = %+v, want %d left", id, s, left)
 		}
 	}
 	rec, _ := f.team(body{"academyName": "Late", "phoneNumber": phoneN(9), "categories": []string{"u10", "u15"}})
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "U10 and U15 are full") {
-		t.Errorf("a team wanting both = %d %q", rec.Code, rec.Body.String())
+		t.Errorf("a team wanting both youth categories = %d %q", rec.Code, rec.Body.String())
 	}
+	// The adults still have room, and only they do.
+	rec, _ = f.team(body{"academyName": "Late", "phoneNumber": phoneN(9), "categories": all})
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "You can still register for Adults on its own") {
+		t.Errorf("a team wanting all three = %d %q", rec.Code, rec.Body.String())
+	}
+	f.mustTeam(t, body{"academyName": "Late", "phoneNumber": phoneN(9), "categories": []string{"adults"}})
 }
 
 func TestOneFullCategoryRefusesTheWholeRegistrationAndSaysWhatIsStillOpen(t *testing.T) {
 	f := newRegFlow()
-	for i := 1; i <= 6; i++ {
+	for i := 1; i <= 3; i++ {
 		f.mustTeam(t, body{"academyName": fmt.Sprintf("Team %d", i), "phoneNumber": phoneN(i), "categories": []string{"u15"}})
 	}
 	rec, _ := f.team(body{"academyName": "Wants Both", "phoneNumber": phoneN(8), "categories": []string{"u10", "u15"}})
@@ -306,10 +337,10 @@ func TestOneFullCategoryRefusesTheWholeRegistrationAndSaysWhatIsStillOpen(t *tes
 		t.Errorf("= %d %q", rec.Code, rec.Body.String())
 	}
 	// Refusing it took nothing from the category that was open.
-	if s := f.slot(t, "u10"); s.Held != 0 || s.Left != 6 {
+	if s := f.slot(t, "u10"); s.Held != 0 || s.Left != 3 {
 		t.Errorf("u10 = %+v, want untouched", s)
 	}
-	if len(f.store.all()) != 6 {
+	if len(f.store.all()) != 3 {
 		t.Errorf("%d registrations stored", len(f.store.all()))
 	}
 }
@@ -318,7 +349,7 @@ func TestAnUnpaidPlaceGoesBackAfterTheHoldWindowButAPaidOneNeverDoes(t *testing.
 	f := newRegFlow()
 	paid := f.mustTeam(t, body{"academyName": "Paid Team", "phoneNumber": phoneN(1)})
 	f.pay(paid.Reference, 200_000)
-	for i := 2; i <= 6; i++ {
+	for i := 2; i <= 3; i++ {
 		f.mustTeam(t, body{"academyName": fmt.Sprintf("Slow %d", i), "phoneNumber": phoneN(i)})
 	}
 	if rec, _ := f.team(body{"academyName": "Next", "phoneNumber": phoneN(7)}); rec.Code != http.StatusConflict {
@@ -332,19 +363,19 @@ func TestAnUnpaidPlaceGoesBackAfterTheHoldWindowButAPaidOneNeverDoes(t *testing.
 
 	f.advance(2 * time.Second)
 	s := f.slot(t, "u10")
-	if s.Paid != 1 || s.Held != 0 || s.Left != 5 {
-		t.Fatalf("after the window u10 = %+v, want the five unpaid places released and the paid one kept", s)
+	if s.Paid != 1 || s.Held != 0 || s.Left != 2 {
+		t.Fatalf("after the window u10 = %+v, want the two unpaid places released and the paid one kept", s)
 	}
 	f.advance(30 * 24 * time.Hour)
 	if s := f.slot(t, "u10"); s.Paid != 1 {
 		t.Errorf("a paid place must never lapse, got %+v", s)
 	}
-	// The five released places are really available.
-	for i := 7; i <= 11; i++ {
+	// The two released places are really available.
+	for i := 7; i <= 8; i++ {
 		f.mustTeam(t, body{"academyName": fmt.Sprintf("Next %d", i), "phoneNumber": phoneN(i)})
 	}
 	if rec, _ := f.team(body{"academyName": "One Too Many", "phoneNumber": phoneN(12)}); rec.Code != http.StatusConflict {
-		t.Errorf("the sixth place after the release = %d, want full", rec.Code)
+		t.Errorf("the place after the release = %d, want full", rec.Code)
 	}
 }
 
@@ -358,7 +389,7 @@ func TestAFailedPromptFreesThePlaceAtOnce(t *testing.T) {
 	if rows := f.store.all(); len(rows) != 1 || rows[0].Status != "Failed" {
 		t.Fatalf("stored = %+v, want it marked Failed", rows)
 	}
-	if s := f.slot(t, "u10"); s.Left != 6 {
+	if s := f.slot(t, "u10"); s.Left != 3 {
 		t.Errorf("u10 = %+v, want the place back", s)
 	}
 	f.gateway.err = nil
@@ -481,8 +512,8 @@ func TestOnePhoneCannotBeUsedToFloodAHandsetWithPrompts(t *testing.T) {
 	}
 }
 
-// Twelve teams ask for the six places of one category in the same instant. Exactly
-// six may be given a place, however the requests interleave.
+// Twelve teams ask for the three open places of a youth category in the same
+// instant. Exactly three may be given a place, however the requests interleave.
 func TestTheLastPlacesAreNeverGivenOutTwice(t *testing.T) {
 	f := newRegFlow()
 	f.h.pay = func(*config.Config, string, string, int, string) (string, error) {
@@ -516,10 +547,10 @@ func TestTheLastPlacesAreNeverGivenOutTwice(t *testing.T) {
 			t.Errorf("unexpected status %d", c)
 		}
 	}
-	if accepted != 6 || refused != 6 {
-		t.Errorf("%d accepted, %d refused; want exactly 6 and 6", accepted, refused)
+	if accepted != 3 || refused != 9 {
+		t.Errorf("%d accepted, %d refused; want exactly 3 and 9", accepted, refused)
 	}
-	if s := f.slot(t, "u10"); s.Held != 6 || s.Left != 0 {
+	if s := f.slot(t, "u10"); s.Held != 3 || s.Left != 0 {
 		t.Errorf("u10 = %+v", s)
 	}
 }
@@ -623,7 +654,7 @@ func TestAFailedPaymentIsReportedButNeverUndoesAPaidOne(t *testing.T) {
 	}
 }
 
-// The prompt went unanswered, the hold ran out and five other teams took the
+// The prompt went unanswered, the hold ran out and three other teams took the
 // places; then the first team's PIN goes through. The money is real, so the
 // registration is paid, but it is flagged: the admin has to refund it.
 func TestAPaymentThatArrivesAfterItsPlaceWasGivenAwayIsFlaggedForARefund(t *testing.T) {
@@ -632,7 +663,7 @@ func TestAPaymentThatArrivesAfterItsPlaceWasGivenAwayIsFlaggedForARefund(t *test
 	f.advance(registration.HoldWindow + time.Minute)
 
 	var others []registered
-	for i := 2; i <= 7; i++ {
+	for i := 2; i <= 4; i++ {
 		others = append(others, f.mustTeam(t, body{"academyName": fmt.Sprintf("Team %d", i), "phoneNumber": phoneN(i)}))
 	}
 	for _, o := range others {
@@ -640,7 +671,7 @@ func TestAPaymentThatArrivesAfterItsPlaceWasGivenAwayIsFlaggedForARefund(t *test
 	}
 	for _, r := range f.store.all() {
 		if len(r.Overflow) != 0 {
-			t.Fatalf("setup: %s was flagged but is within the six: %+v", r.TeamName, r)
+			t.Fatalf("setup: %s was flagged but is within the three: %+v", r.TeamName, r)
 		}
 	}
 
@@ -654,8 +685,8 @@ func TestAPaymentThatArrivesAfterItsPlaceWasGivenAwayIsFlaggedForARefund(t *test
 	if got.Status != "Paid" || !reflect.DeepEqual(got.Overflow, []string{"u10"}) {
 		t.Errorf("late payer = %+v, want Paid and flagged for u10", got)
 	}
-	// The six who were in time are not touched.
-	if s := f.slot(t, "u10"); s.Paid != 7 {
+	// The teams that were in time are not touched.
+	if s := f.slot(t, "u10"); s.Paid != 4 {
 		t.Errorf("u10 = %+v", s)
 	}
 	_, _, view := f.adminTournament(t)
@@ -673,18 +704,20 @@ func TestAPaymentThatArrivesAfterItsPlaceWasGivenAwayIsFlaggedForARefund(t *test
 	}
 }
 
-func TestTheSixthPayingTeamIsNotFlagged(t *testing.T) {
-	f := newRegFlow()
-	var refs []string
-	for i := 1; i <= 6; i++ {
-		refs = append(refs, f.mustTeam(t, body{"academyName": fmt.Sprintf("Team %d", i), "phoneNumber": phoneN(i)}).Reference)
-	}
-	for _, r := range refs {
-		f.pay(r, 200_000)
-	}
-	for _, r := range f.store.all() {
-		if r.Status != "Paid" || len(r.Overflow) != 0 {
-			t.Errorf("%s = %s overflow %v, want all six paid and unflagged", r.TeamName, r.Status, r.Overflow)
+func TestTheLastPayingTeamOfACategoryIsNotFlagged(t *testing.T) {
+	for id, open := range map[string]int{"u10": 3, "u15": 3, "adults": 6} {
+		f := newRegFlow()
+		var refs []string
+		for i := 1; i <= open; i++ {
+			refs = append(refs, f.mustTeam(t, body{"academyName": fmt.Sprintf("Team %d", i), "phoneNumber": phoneN(i), "categories": []string{id}}).Reference)
+		}
+		for _, r := range refs {
+			f.pay(r, 200_000)
+		}
+		for _, r := range f.store.all() {
+			if r.Status != "Paid" || len(r.Overflow) != 0 {
+				t.Errorf("%s: %s = %s overflow %v, want every open place paid and unflagged", id, r.TeamName, r.Status, r.Overflow)
+			}
 		}
 	}
 }
@@ -888,13 +921,13 @@ func TestThePublicTournamentInfoStatesTheRulesOfTheFormAndNamesNobody(t *testing
 		t.Errorf("the public info leaked a team: %s", rec.Body.String())
 	}
 	info := f.info(t)
-	if info.Fee != 2_000 || info.TeamsPerCategory != 6 || info.MinPlayers != 5 || info.MaxPlayers != 40 || info.RulesVersion != registration.RulesVersion || info.HoldMinutes != 3 {
+	if info.Fee != 2_000 || info.MinPlayers != 5 || info.MaxPlayers != 40 || info.RulesVersion != registration.RulesVersion || info.HoldMinutes != 3 {
 		t.Errorf("info = %+v", info)
 	}
-	if len(info.Categories) != 2 || info.Categories[0].ID != "u10" || info.Categories[0].Label != "U10" || info.Categories[1].ID != "u15" {
-		t.Errorf("categories = %+v, want U10 then U15", info.Categories)
+	if len(info.Categories) != 3 || info.Categories[0].ID != "u10" || info.Categories[0].Label != "U10" || info.Categories[1].ID != "u15" || info.Categories[2].ID != "adults" {
+		t.Errorf("categories = %+v, want U10, U15 then Adults", info.Categories)
 	}
-	if info.Categories[0].Held != 1 || info.Categories[0].Left != 5 || info.Categories[1].Left != 6 {
+	if info.Categories[0].Held != 1 || info.Categories[0].Left != 2 || info.Categories[1].Left != 3 || info.Categories[2].Left != 6 {
 		t.Errorf("slots = %+v", info.Categories)
 	}
 
@@ -936,14 +969,14 @@ func (f *regFlow) adminTournament(t *testing.T) (int, []slotView, []tournamentRe
 		t.Fatalf("admin tournament = %d %s", rec.Code, rec.Body.String())
 	}
 	var out struct {
-		TeamsPerCategory int                          `json:"teamsPerCategory"`
-		Categories       []slotView                   `json:"categories"`
-		Registrations    []tournamentRegistrationView `json:"registrations"`
+		Fee           int                          `json:"fee"`
+		Categories    []slotView                   `json:"categories"`
+		Registrations []tournamentRegistrationView `json:"registrations"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	return out.TeamsPerCategory, out.Categories, out.Registrations
+	return out.Fee, out.Categories, out.Registrations
 }
 
 func TestTheAdminSeesEveryTournamentRegistrationAndTheSlotsTaken(t *testing.T) {
@@ -957,10 +990,7 @@ func TestTheAdminSeesEveryTournamentRegistrationAndTheSlotsTaken(t *testing.T) {
 	f.event(c.Reference, "charge.failed", "failed") // a failed one is not listed
 	_ = b
 
-	per, slots, regs := f.adminTournament(t)
-	if per != 6 {
-		t.Errorf("teamsPerCategory = %d", per)
-	}
+	_, slots, regs := f.adminTournament(t)
 	var names []string
 	byName := map[string]tournamentRegistrationView{}
 	for _, r := range regs {
@@ -977,7 +1007,7 @@ func TestTheAdminSeesEveryTournamentRegistrationAndTheSlotsTaken(t *testing.T) {
 	if v := byName["Team B"]; v.Status != "Pending" || v.PaidAt != nil || !reflect.DeepEqual(v.Categories, []string{"u10", "u15"}) || v.Players != 20 {
 		t.Errorf("Team B = %+v", v)
 	}
-	if len(slots) != 2 || slots[0].Paid != 1 || slots[0].Held != 1 || slots[0].Left != 4 || slots[1].Held != 1 || slots[1].Left != 5 {
+	if len(slots) != 3 || slots[0].Paid != 1 || slots[0].Held != 1 || slots[0].Left != 1 || slots[0].Reserved != 1 || slots[1].Held != 1 || slots[1].Left != 2 || slots[2].Left != 6 {
 		t.Errorf("slots = %+v", slots)
 	}
 }

@@ -12,15 +12,28 @@ import (
 
 func TestFeesAndPlacesAreWhatTheAcademyAnnounced(t *testing.T) {
 	// If any of these change, the rules page and the SMS wording must change too.
-	if TournamentFeeKES != 2_000 || AcademyFeeKES != 5_000 || TeamsPerCategory != 6 {
-		t.Errorf("fees %d/%d and %d places per category", TournamentFeeKES, AcademyFeeKES, TeamsPerCategory)
+	if TournamentFeeKES != 2_000 || AcademyFeeKES != 5_000 {
+		t.Errorf("fees %d/%d", TournamentFeeKES, AcademyFeeKES)
 	}
-	var ids []string
+	type shape struct {
+		id, group      string
+		capacity, open int
+	}
+	var got []shape
 	for _, c := range Categories() {
-		ids = append(ids, c.ID)
+		got = append(got, shape{c.ID, c.Group, c.Capacity, c.Open()})
 	}
-	if !reflect.DeepEqual(ids, []string{"u10", "u15"}) {
-		t.Errorf("categories = %v, want U10 and U15", ids)
+	// Youth: 4 teams in each of U10 and U15, one place in each already taken by
+	// St. Sebastian Sports Academy, so 3 are open. Adults: 6 teams.
+	want := []shape{{"u10", "youth", 4, 3}, {"u15", "youth", 4, 3}, {"adults", "adults", 6, 6}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("categories = %+v, want %+v", got, want)
+	}
+	if u10, _ := LookupCategory("u10"); u10.Reserved != 1 {
+		t.Errorf("the academy holds one place in U10, got %d", u10.Reserved)
+	}
+	if adults, _ := LookupCategory("adults"); adults.Reserved != 0 {
+		t.Errorf("nothing is reserved in the adults, got %d", adults.Reserved)
 	}
 }
 
@@ -31,7 +44,9 @@ func TestNewEntry(t *testing.T) {
 		want []string
 	}{
 		{"one category", []string{"u15"}, []string{"u15"}},
-		{"both, in any order", []string{"u15", "u10"}, []string{"u10", "u15"}},
+		{"both youth, in any order", []string{"u15", "u10"}, []string{"u10", "u15"}},
+		{"youth and adults", []string{"adults", "u10"}, []string{"u10", "adults"}},
+		{"adults only", []string{"adults"}, []string{"adults"}},
 		{"repeats collapse to one place", []string{"u10", "u10", "u15", "u10"}, []string{"u10", "u15"}},
 	}
 	for _, c := range cases {
@@ -44,7 +59,7 @@ func TestNewEntry(t *testing.T) {
 			t.Errorf("%s: fee = %d, want Ksh 2,000 for the registration", c.name, got.FeeKES)
 		}
 	}
-	for name, in := range map[string][]string{"none": nil, "empty": {}, "unknown": {"u12"}, "one good one bad": {"u10", "senior"}, "wrong case": {"U10"}} {
+	for name, in := range map[string][]string{"none": nil, "empty": {}, "unknown": {"u12"}, "singular": {"adult"}, "one good one bad": {"u10", "senior"}, "wrong case": {"U10"}} {
 		if got, err := NewEntry(in); err == nil {
 			t.Errorf("%s: NewEntry(%v) = %v, want an error", name, in, got)
 		}
@@ -62,19 +77,25 @@ func TestValidatePlayers(t *testing.T) {
 	}
 }
 
-func TestSlots(t *testing.T) {
+func TestPlacesLeft(t *testing.T) {
 	for _, c := range []struct {
-		paid, held, left int
-		full             bool
-	}{{0, 0, 6, false}, {2, 3, 1, false}, {5, 0, 1, false}, {3, 3, 0, true}, {6, 0, 0, true}, {4, 4, 0, true}} {
+		id         string
+		paid, held int
+		left       int
+	}{
+		{"u10", 0, 0, 3}, {"u10", 1, 1, 1}, {"u10", 2, 0, 1}, {"u10", 2, 1, 0}, {"u10", 3, 0, 0}, {"u10", 5, 5, 0},
+		{"u15", 0, 0, 3}, {"u15", 0, 3, 0},
+		{"adults", 0, 0, 6}, {"adults", 4, 2, 0}, {"adults", 5, 0, 1},
+		{"u12", 0, 0, 0}, // not a category: nothing to take
+	} {
 		s := Slots{Paid: c.paid, Held: c.held}
-		if s.Left() != c.left || s.Full() != c.full {
-			t.Errorf("%+v: left %d full %v, want %d %v", s, s.Left(), s.Full(), c.left, c.full)
+		if got := Left(c.id, s); got != c.left || Full(c.id, s) != (c.left == 0) {
+			t.Errorf("%s %+v: left %d full %v, want %d", c.id, s, got, Full(c.id, s), c.left)
 		}
 	}
-	got := Unavailable([]string{"u10", "u15"}, map[string]Slots{"u10": {Paid: 6}, "u15": {Paid: 1}})
-	if !reflect.DeepEqual(got, []string{"U10"}) {
-		t.Errorf("Unavailable = %v, want [U10]", got)
+	got := Unavailable([]string{"u10", "u15", "adults"}, map[string]Slots{"u10": {Paid: 3}, "u15": {Paid: 1}, "adults": {Paid: 6}})
+	if !reflect.DeepEqual(got, []string{"U10", "Adults"}) {
+		t.Errorf("Unavailable = %v, want [U10 Adults]", got)
 	}
 	if got := Unavailable([]string{"u10", "u15"}, nil); len(got) != 0 {
 		t.Errorf("with nobody registered nothing is unavailable, got %v", got)
@@ -82,19 +103,25 @@ func TestSlots(t *testing.T) {
 }
 
 func TestOverCapacity(t *testing.T) {
-	// Six other teams have paid in U10, five in U15: this payment is one too many
-	// only for U10.
-	got := OverCapacity([]string{"u10", "u15"}, map[string]int{"u10": 6, "u15": 5})
+	// Three other teams have paid in U10 (all the places the website has), two in
+	// U15 and five in the adults: this payment is one too many only for U10.
+	got := OverCapacity([]string{"u10", "u15", "adults"}, map[string]int{"u10": 3, "u15": 2, "adults": 5})
 	if !reflect.DeepEqual(got, []string{"u10"}) {
 		t.Errorf("OverCapacity = %v, want [u10]", got)
 	}
-	if got := OverCapacity([]string{"u10"}, map[string]int{"u10": 5}); len(got) != 0 {
-		t.Errorf("the sixth paying team is within capacity, got %v", got)
+	if got := OverCapacity([]string{"adults"}, map[string]int{"adults": 6}); !reflect.DeepEqual(got, []string{"adults"}) {
+		t.Errorf("a seventh adult team is over capacity, got %v", got)
+	}
+	if got := OverCapacity([]string{"u10"}, map[string]int{"u10": 2}); len(got) != 0 {
+		t.Errorf("the third paying youth team is within capacity, got %v", got)
+	}
+	if got := OverCapacity([]string{"u12"}, map[string]int{"u12": 99}); len(got) != 0 {
+		t.Errorf("an unknown category is not flagged: %v", got)
 	}
 }
 
 func TestLabels(t *testing.T) {
-	for in, want := range map[string]string{"": "", "u10": "U10", "u10,u15": "U10 and U15", "u10,u15,u12": "U10, U15 and U12"} {
+	for in, want := range map[string]string{"": "", "u10": "U10", "u10,u15": "U10 and U15", "u10,adults": "U10 and Adults", "u10,u15,u12": "U10, U15 and U12"} {
 		var ids []string
 		if in != "" {
 			ids = strings.Split(in, ",")

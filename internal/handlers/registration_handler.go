@@ -123,10 +123,14 @@ type tournamentRequest struct {
 }
 
 // slotView is how many places of a category are taken, for the page and the admin.
+// Capacity is every team the category takes and Reserved how many of those the
+// academy's own teams hold; Left is what a new team can still get.
 type slotView struct {
 	ID       string `json:"id"`
 	Label    string `json:"label"`
+	Group    string `json:"group"`
 	Capacity int    `json:"capacity"`
+	Reserved int    `json:"reserved"`
 	Paid     int    `json:"paid"`
 	Held     int    `json:"held"`
 	Left     int    `json:"left"`
@@ -137,7 +141,10 @@ func slotViews(slots map[string]registration.Slots) []slotView {
 	out := make([]slotView, 0, len(cats))
 	for _, c := range cats {
 		s := slots[c.ID]
-		out = append(out, slotView{ID: c.ID, Label: c.Label, Capacity: registration.TeamsPerCategory, Paid: s.Paid, Held: s.Held, Left: s.Left()})
+		out = append(out, slotView{
+			ID: c.ID, Label: c.Label, Group: c.Group, Capacity: c.Capacity, Reserved: c.Reserved,
+			Paid: s.Paid, Held: s.Held, Left: registration.Left(c.ID, s),
+		})
 	}
 	return out
 }
@@ -155,13 +162,12 @@ func (h *RegistrationHandler) TournamentInfo(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	body, err := json.Marshal(map[string]any{
-		"fee":              registration.TournamentFeeKES,
-		"teamsPerCategory": registration.TeamsPerCategory,
-		"minPlayers":       registration.MinPlayers,
-		"maxPlayers":       registration.MaxPlayers,
-		"rulesVersion":     registration.RulesVersion,
-		"holdMinutes":      int(registration.HoldWindow / time.Minute),
-		"categories":       slotViews(slots),
+		"fee":          registration.TournamentFeeKES,
+		"minPlayers":   registration.MinPlayers,
+		"maxPlayers":   registration.MaxPlayers,
+		"rulesVersion": registration.RulesVersion,
+		"holdMinutes":  int(registration.HoldWindow / time.Minute),
+		"categories":   slotViews(slots),
 	})
 	if err != nil {
 		http.Error(w, "Failed to load the tournament", http.StatusInternalServerError)
@@ -174,15 +180,15 @@ func (h *RegistrationHandler) TournamentInfo(w http.ResponseWriter, r *http.Requ
 func fullMessage(full, wanted []string, slots map[string]registration.Slots) string {
 	var msg string
 	if len(full) == 1 {
-		msg = fmt.Sprintf("%s is full: all %d teams have registered.", full[0], registration.TeamsPerCategory)
+		msg = fmt.Sprintf("%s is full: all its places are taken.", full[0])
 	} else {
-		msg = fmt.Sprintf("%s are full: all %d teams have registered in each.", strings.Join(full, " and "), registration.TeamsPerCategory)
+		msg = fmt.Sprintf("%s are full: all their places are taken.", strings.Join(full, " and "))
 	}
 	var open []string
 	stillPaying := false
 	for _, id := range wanted {
 		s := slots[id]
-		if s.Full() {
+		if registration.Full(id, s) {
 			stillPaying = stillPaying || s.Held > 0
 			continue
 		}
@@ -680,11 +686,10 @@ func (h *RegistrationHandler) ListTournamentAdmin(w http.ResponseWriter, r *http
 		})
 	}
 	body, err := json.Marshal(map[string]any{
-		"teamsPerCategory": registration.TeamsPerCategory,
-		"fee":              registration.TournamentFeeKES,
-		"holdMinutes":      int(registration.HoldWindow / time.Minute),
-		"categories":       slotViews(slots),
-		"registrations":    views,
+		"fee":           registration.TournamentFeeKES,
+		"holdMinutes":   int(registration.HoldWindow / time.Minute),
+		"categories":    slotViews(slots),
+		"registrations": views,
 	})
 	if err != nil {
 		http.Error(w, "Failed to load registrations", http.StatusInternalServerError)

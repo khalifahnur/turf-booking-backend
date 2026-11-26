@@ -41,10 +41,6 @@ const (
 )
 
 const (
-	// TeamsPerCategory is how many teams each category takes. Places go to
-	// whoever registers first.
-	TeamsPerCategory = 6
-
 	// MinPlayers and MaxPlayers bound the squad size a team states. They are
 	// sanity limits against typos, not the tournament's squad rules.
 	MinPlayers = 5
@@ -55,7 +51,7 @@ const (
 	// one, so a stale browser tab cannot record agreement to wording that has
 	// since changed. Bump it together with the rules in the frontend
 	// (lib/tournament.ts) whenever they change.
-	RulesVersion = "tournament-2026-v1"
+	RulesVersion = "tournament-2026-v2"
 )
 
 // Statuses stored on a registration.
@@ -77,15 +73,27 @@ const (
 // case it is flagged for a refund (see OverCapacity).
 const HoldWindow = 3 * time.Minute
 
-// Category is an age group of the tournament.
+// Category is a division of the tournament. Places in it go to whoever
+// registers first. Capacity is how many teams it takes in all; Reserved is how
+// many of those places are already taken by the academy's own teams, which are
+// not sold on the website, so only Capacity - Reserved are open to everyone else.
 type Category struct {
-	ID    string
-	Label string
+	ID       string
+	Label    string
+	Group    string // "youth" or "adults", for how the pages group them
+	Capacity int
+	Reserved int
 }
 
+// Open is how many places of the category the website can give out.
+func (c Category) Open() int { return max(0, c.Capacity-c.Reserved) }
+
+// The youth tournament takes 4 teams in each of U10 and U15 (St. Sebastian
+// Sports Academy has one place in each already), and the adults take 6.
 var categories = []Category{
-	{ID: "u10", Label: "U10"},
-	{ID: "u15", Label: "U15"},
+	{ID: "u10", Label: "U10", Group: "youth", Capacity: 4, Reserved: 1},
+	{ID: "u15", Label: "U15", Group: "youth", Capacity: 4, Reserved: 1},
+	{ID: "adults", Label: "Adults", Group: "adults", Capacity: 6, Reserved: 0},
 }
 
 // Categories lists the age groups in the order they are shown.
@@ -137,24 +145,31 @@ func ValidatePlayers(n int) error {
 	return nil
 }
 
-// Slots is how many places of a category are spoken for.
+// Slots is how many places of a category the website has given out.
 type Slots struct {
 	Paid int // registrations that have paid
 	Held int // registrations whose prompt may still be answered
 }
 
-// Left is how many places are still free.
-func (s Slots) Left() int { return max(0, TeamsPerCategory-s.Paid-s.Held) }
+// Left is how many places of the category are still free for a new
+// registration. An unknown category has none.
+func Left(id string, s Slots) int {
+	c, ok := LookupCategory(id)
+	if !ok {
+		return 0
+	}
+	return max(0, c.Open()-s.Paid-s.Held)
+}
 
-// Full reports whether no place is left for a new registration.
-func (s Slots) Full() bool { return s.Left() == 0 }
+// Full reports whether the category has no place left for a new registration.
+func Full(id string, s Slots) bool { return Left(id, s) == 0 }
 
 // Unavailable lists the labels of the wanted categories that have no place left,
 // in the order the categories are shown.
 func Unavailable(wanted []string, slots map[string]Slots) []string {
 	var out []string
 	for _, id := range wanted {
-		if slots[id].Full() {
+		if Full(id, slots[id]) {
 			c, _ := LookupCategory(id)
 			out = append(out, c.Label)
 		}
@@ -162,13 +177,15 @@ func Unavailable(wanted []string, slots map[string]Slots) []string {
 	return out
 }
 
-// OverCapacity lists the wanted categories that already have TeamsPerCategory
-// paid registrations other than this one. A registration that settles into one is
-// money taken for a place that no longer exists, which the admin must refund.
+// OverCapacity lists the wanted categories that already have as many paid
+// registrations, other than this one, as the website can give places for. A
+// registration that settles into one is money taken for a place that no longer
+// exists, which the admin must refund.
 func OverCapacity(wanted []string, paidByOthers map[string]int) []string {
 	var out []string
 	for _, id := range wanted {
-		if paidByOthers[id] >= TeamsPerCategory {
+		c, ok := LookupCategory(id)
+		if ok && paidByOthers[id] >= c.Open() {
 			out = append(out, id)
 		}
 	}
